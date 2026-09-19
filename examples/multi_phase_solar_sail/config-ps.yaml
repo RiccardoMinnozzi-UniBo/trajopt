@@ -1,0 +1,54 @@
+# Pseudospectral variant of config.yaml.
+#
+# Identical problem -- same dynamics, bounds, scaling, guess and terminal
+# conditions -- discretised with flipped Legendre-Radau collocation instead of
+# RK4 multiple shooting.  Everything is inherited, so the two configurations
+# cannot drift apart: only what genuinely belongs to the discretisation is
+# overridden here.
+#
+#     python main.py config-ps.yaml
+#
+# Caveat
+# ------
+# trajopt's pseudospectral mesh pins each segment's initial epoch (see README,
+# "Observations about trajopt", item 3).  Combined with time continuity this
+# freezes every interior phase boundary at its initial-guess longitude.  The
+# shadow-terminator equality then stops doing what it is meant to do: with the
+# boundary longitude frozen, the only way left to satisfy r(L) |sin L| = R_Earth
+# is to bend the orbit radius at that longitude, which is backwards -- the
+# geometry should locate the boundary, not deform the trajectory.
+#
+# The formulation is kept identical anyway, because the alternative is to solve
+# a different problem here and call the comparison fair.  Expect PS to carry a
+# larger residual on that equality until the missing term is restored in
+# trajopt's mesh relation.
+#
+# Notes on the two methods
+# ------------------------
+# * `nsub` (RK4 substeps per shooting interval) has no meaning here: Radau
+#   collocation enforces the dynamics at the collocation nodes through the
+#   differentiation matrix rather than by integrating between them.
+# * `equal_dt` must be off.  Radau nodes are deliberately not equally spaced.
+# * `hp_segments` splits each arc into that many Radau sub-intervals.  It must
+#   divide (num_nodes - 1) for *every* segment, sunlit and eclipse alike, since
+#   it is a method-wide flag; 1 means one global polynomial per arc and so
+#   places no constraint on the node counts.  That is what lets this file reuse
+#   the node counts from config.yaml unchanged, which is what makes the two
+#   methods comparable.
+
+inherit: config.yaml
+
+# Deliberately no `problem:` block.  The entire problem definition -- the
+# shadow-terminator treatment included -- is inherited verbatim, so the two
+# configurations cannot disagree about the physics: there is exactly one place
+# where it is written down.  Only the discretisation and the output directory
+# differ below.
+
+method:
+  flags:
+    discretize: ps
+    equal_dt: 0
+    hp_segments: 1
+
+output:
+  directory: results-ps

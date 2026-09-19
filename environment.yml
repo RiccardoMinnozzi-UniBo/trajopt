@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+
+dependencies:
+  - python==3.13.1
+  - pip
+  - pip:
+      # Install this repository in editable mode; dependencies come from pyproject.toml.
+      - "-e .[dev]"

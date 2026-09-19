@@ -1,0 +1,247 @@
+# Multi-phase solar-sail GEO disposal  --  Kelly & Bevilacqua (2021), Section 5.1
+#
+# A sail-equipped spacecraft starts on a circular geostationary orbit and must
+# reach a near-circular graveyard orbit safely above the GEO belt, using solar
+# radiation pressure alone.  Each revolution crosses the Earth shadow once,
+# where the sail produces no thrust, so the trajectory is a chain of alternating
+# sunlit and eclipse arcs solved as one multi-phase optimal control problem.
+#
+# Two simplifications relative to the reference: only Earth gravity is retained
+# (no lunar/solar third-body perturbations), and the Sun direction is fixed in
+# inertial space (no time-varying ephemeris).  Neither changes the structure of
+# the problem.
+#
+# ---------------------------------------------------------------------------
+# The knobs you are most likely to turn
+# ---------------------------------------------------------------------------
+#   problem.revolutions              structural guess -> phase count and guess
+#   problem.revolution_search        outer loop that refines that guess
+#   problem.sail.area_to_mass_m2_kg  the dominant performance parameter
+#   problem.graveyard                the terminal orbit requirement
+#   problem.state_bounds             must bracket the trajectory; sets scaling
+#   problem.sunlit_nodes / eclipse_nodes   discretisation per arc
+#   method.flags.iter_max            SCP iteration budget
+# ---------------------------------------------------------------------------
+
+problem:
+  # Structural guess for the number of revolutions.  It sets how many phases the
+  # problem has and seeds the initial guess, but it is NOT a boundary condition:
+  # interior arcs end on the shadow terminator wherever that happens to be, and
+  # the final arc ends wherever the minimum-time solution wants it to.
+  # This is only a STARTING GUESS.  main.py searches over the revolution count
+  # and brackets the minimum from here, so a wrong value costs extra solves but
+  # never the right answer.  Minima found by that search:
+  #
+  #     area_to_mass_m2_kg = 10  ->  revolutions = 1   (3 phases, ~1.23 days)
+  #     area_to_mass_m2_kg =  1  ->  revolutions = 3   (7 phases, ~2.67 days)
+  #
+  # Everything else in this file is shared between the two; only this changes.
+  # Setting it close to the expected answer just makes the search cheaper.
+  revolutions: 4
+
+  # How far the final arc may be stretched or shortened past its nominal end,
+  # in radians.  About one revolution of slack gives the minimum-time cost a
+  # real lever without letting the trajectory jump a whole phase.
+  final_longitude_freedom_rad: "${np.pi}"
+
+  # --- the shadow terminator -------------------------------------------------
+  # The terminator is the edge of the Earth's shadow: the instant the spacecraft
+  # crosses into or out of eclipse.  It is what physically defines where one
+  # phase ends and the next begins -- on one side the sail is lit and produces
+  # thrust, on the other it produces none.
+  #
+  # That crossing does not sit at a fixed longitude.  It is where the
+  # spacecraft's perpendicular distance from the Earth-Sun line equals the
+  # Earth's radius, i.e. r(L) |sin L| = R_Earth, so it depends on the orbit
+  # radius at that moment and moves as the orbit is raised.
+  #
+  # `enforce_shadow_terminator` imposes exactly that, as the nonconvex equality
+  # shadow_boundary = 0 at the end of every interior arc, so the solver places
+  # each boundary where the crossing actually occurs.  This is the physically
+  # representative formulation and the reason it is on: the alternative is to
+  # pin each boundary to a constant worked out from the initial circular orbit,
+  # which is only an approximation of the geometry.
+  #
+  # The window below is a *guard*, not the placement mechanism.  The terminator
+  # equation has several roots per revolution (shadow entry, shadow exit, and
+  # the two sunward points where the perpendicular distance is also R_Earth),
+  # so the window keeps each boundary on the root it belongs to and stops an arc
+  # collapsing or inverting.  The nominal eclipse arc is ~0.304 rad, so 0.05
+  # leaves every arc >= 0.2 rad.
+  #
+  # Both discretisations use this same setting -- config-ps.yaml inherits it
+  # rather than restating it, so the two cannot disagree about the physics.
+  terminator_window_rad: 0.05
+  enforce_shadow_terminator: true
+
+  # The Sun sits along -sun_direction_eci, so the shadow is centred on
+  # L = 0 (mod 2*pi).  Starting at L = pi puts the spacecraft in full sunlight
+  # at the initial time, as in the reference.
+  initial_longitude_rad: "${np.pi}"
+
+  # Nodes per arc, both endpoints included.  Eclipse arcs are short (about
+  # 17.4 deg) and carry no control authority, so they need far fewer nodes.
+  sunlit_nodes: 36
+  eclipse_nodes: 12
+
+  constants:
+    earth_mu_km3_s2: 398600.436233
+    earth_radius_km: 6378.1366
+    geo_radius_km:   42164.1696
+    day_s:           86400.0
+
+  sail:
+    area_to_mass_m2_kg:  1.0        # A/m of the sail-craft
+    solar_pressure_n_m2: 4.5391e-6   # solar radiation pressure at 1 AU
+    reflectivity:        1.0         # 1.0 = perfect specular reflector
+
+  # Form of the minimum-time objective.  See _add_minimum_time_cost().
+  #   longitude    - trajopt's min_time on the independent variable.  Cannot be
+  #                  gamed, but is indifferent to an over-raised orbit.
+  #   elapsed_time - cost on the elapsed-time state.  Penalises over-raising,
+  #                  since a higher orbit has a longer period.
+  #   both         - longitude, plus elapsed time at a small weight to break
+  #                  ties within the flat set the longitude cost leaves behind.
+  minimum_time_objective: elapsed_time
+  elapsed_time_cost_weight: 0.1
+
+  # Maximum sail slew rate, in steering radians per radian of orbital travel.
+  # This is a real attitude-control limit, and it is also what keeps the problem
+  # numerically tractable: without it the minimum-time optimum is bang-bang, the
+  # primer flips by ~180 deg between adjacent nodes, and the dynamics defect
+  # stalls around 1e-3 no matter how fine the mesh.  2.0 corresponds to roughly
+  # one full revolution of the sail per half orbit.
+  max_steering_rate_rad_per_rad: 2.0
+
+  # Earth-to-Sun unit vector in ECI.  [-1, 0, 0] places the Sun in the
+  # equatorial plane, which keeps the whole problem planar.
+  sun_direction_eci: [-1.0, 0.0, 0.0]
+
+  # Terminal graveyard orbit, per the IADC guidelines (Table B2 in the paper):
+  # near-circular, safely above the geostationary belt.
+  #
+  # The eccentricity cap is the demanding half.  A sail is pushed only away from
+  # the Sun, so thrust is available on roughly half of each orbit and the natural
+  # tendency is for eccentricity to grow.  Meeting the cap requires the optimiser
+  # to shape the eccentricity vector over the whole transfer rather than react
+  # locally, which is exactly what a full trajectory optimisation can do and a
+  # feedback law cannot.  If the terminal set cannot be met, the revolution
+  # search will report it and try a different revolution count.
+  graveyard:
+    perigee_altitude_km: 250.0   # perigee radius must reach r_GEO + this
+    eccentricity_max:    0.003
+
+  # Outer loop over the revolution count (the paper's Algorithm 1).  main.py
+  # runs this on every invocation, starting from the guess above and bracketing
+  # the minimum from there: stepping down if the guess is feasible, up if it is
+  # not.  That is what makes the example self-driving -- change the sail or the
+  # discretisation and it still finds the minimum-time solution.
+  #
+  # Each step is a full SCP solve, so a good guess is worth having; it just is
+  # not required.  `minimum` and `maximum` bound the scan and `max_solves` caps
+  # the total work.
+  revolution_search:
+    enabled: true      # set false to solve once at the guess instead
+    minimum: 1
+    maximum: 30
+    max_solves: 12
+
+  # Allowed state intervals (paper Eq. 44).  These also set the scaling, but see
+  # _state_scales() in problem.py: trajopt divides by a scale with no offset, so
+  # the interval amplitude is the right scale only for a state centred on zero
+  # (f, g, h, k, elapsed time).  The semi-latus rectum is not, so it is scaled by
+  # its magnitude instead -- dividing p ~ 42164 km by a 700 km amplitude would
+  # leave p_nd ~ 60 and the dynamics defect stalls two orders of magnitude above
+  # tolerance.
+  #
+  # The bounds must BRACKET the whole trajectory, not just its endpoints.  The
+  # sail pumps eccentricity on the way out and the optimiser then brings it back
+  # under the graveyard cap, so the peak in f and g is well above the terminal
+  # value; clipping it shows up as a dynamics defect, not as a visibly active
+  # bound.  The validation report prints the peaks, so size these from a run.
+  #
+  # The orbital-element bounds are fixed by the terminal orbit, which does not
+  # depend on the sail, so these same numbers serve any area-to-mass ratio.  The
+  # elapsed-time bound is the exception and is derived from the revolution count
+  # rather than written out, which is what keeps the revolution count the only
+  # thing that changes between sail sizings.
+  state_bounds:
+    semi_latus_offset_km:    [-100.0, 600.0]   # relative to r_GEO
+    eccentricity_component:  [-0.004, 0.004]   # f and g
+    inclination_component:   [-0.1, 0.1]       # h and k (stay at 0: planar)
+    days_per_revolution_bound: 1.2             # a revolution takes ~1.0 day;
+                                               # this bounds the elapsed time
+
+  # Initial guess.  The steering angle is ramped between these two values and
+  # the state comes from propagating the true dynamics through the arcs in
+  # turn, so the guess is an actual trajectory rather than a straight line.
+  #
+  # The paper's Eq. 53 start primer is radial, i.e. theta = 0.  Do not use that
+  # here: the trajectory starts at L = pi with the Sun at -X, so the radial
+  # direction points straight into the Sun, the steering law feathers the sail
+  # (alpha = 90 deg, no thrust) and the guess begins on the one point where the
+  # law is not differentiable.  Starting transverse, Eq. 54's end primer, avoids
+  # it and gives the sail authority from the first node.
+  guess:
+    steering_angle_start_rad: "${0.5 * np.pi}"
+    steering_angle_stop_rad: "${0.5 * np.pi}"
+
+# ===========================================================================
+# Method / solver
+# ===========================================================================
+method:
+  inherit: trajopt/methods/dev/sqp/configs/autoscvx.yaml
+
+  flags:
+    equal_dt:     1
+    zoh_dilation: 1
+    second_order: 0     # first-order SCP: cheaper per iteration
+    nsub:         6     # RK4 substeps per multiple-shooting interval
+    iter_max:     600
+    quiet:        0
+
+  solver_opts:
+    solver: Clarabel    # ships with CVXPY and handles the terminal cones
+
+  # Virtual buffers (slack) per constraint class.
+  #   vb: none     - hard constraint, the linearised form must hold from the
+  #                  first subproblem.  Only safe when the initial guess
+  #                  already satisfies it.
+  #   vb: standard - slack is added and the penalty autotune drives it to zero
+  #                  over the SCP iterations (the default).
+  penalty:
+    # trajopt's min_time cost sums the longitude over every node of the final
+    # segment, so its magnitude grows with the node count and it can outweigh
+    # the dynamics penalty: the optimiser then buys a shorter trajectory by
+    # leaving a dynamics defect.  Starting the dynamics penalty high restores
+    # the balance; raise it further if the defect stalls above the tolerance.
+    dynamics:
+      W:
+        penalty: True
+        autotune: True
+        init: 100.0
+
+    # The guess is propagated arc by arc and chained, so it is exactly
+    # continuous already, and all three continuity constraints are linear.
+    state_continuity:
+      vb: none
+    time_continuity:
+      vb: none
+    control_continuity:
+      vb: none
+
+    # The arc-end windows are linear in the longitude and the guess sits inside
+    # them, so they can be enforced hard.
+    final_nonconvex_inequality:
+      vb: none
+
+    # The shadow-terminator equality is genuinely nonlinear and the guess only
+    # satisfies it approximately, so it needs slack that the autotune removes.
+    final_nonconvex_equality:
+      vb: standard
+
+output:
+  directory: results
+  solution_file: solution.npz
+  animation_file: trajectory_3d.gif
+  animation_frames: 72
