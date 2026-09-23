@@ -222,15 +222,30 @@ def phase_boundaries(settings: AttrDict) -> list[tuple[float, float, bool]]:
     for revolution in range(1, n_rev + 1):
         centre = 2.0 * np.pi * revolution + rate * revolution * period_days
         crossings.extend((centre - half_shadow, centre + half_shadow))
-    crossings = [L for L in crossings if start + _MIN_ARC_RAD < L < stop - _MIN_ARC_RAD]
+    # Track which crossings are shadow *entries*, so each arc can be labelled by
+    # construction.  Deciding it afterwards from the geometry -- "is the arc
+    # midpoint within half_shadow of a multiple of 2*pi" -- silently assumes a
+    # fixed Sun.  With the Sun moving, the crossings drift by Omega*t, and once
+    # that exceeds half_shadow (about nine days here) every later eclipse arc is
+    # mislabelled as sunlit and the sail is given thrust it should not have.
+    entries = []
+    for revolution in range(1, n_rev + 1):
+        centre = 2.0 * np.pi * revolution + rate * revolution * period_days
+        entries.extend((True, False))  # (centre - half_shadow, centre + half_shadow)
+
+    inside = [(L, is_entry) for L, is_entry in zip(crossings, entries)
+              if start + _MIN_ARC_RAD < L < stop - _MIN_ARC_RAD]
+    crossings = [L for L, _ in inside]
+
+    # An arc is eclipsed when it begins at a shadow entry.
+    sunlit_flags = [True]  # the trajectory starts in sunlight at L0 = pi
+    for _, is_entry in inside:
+        sunlit_flags.append(not is_entry)
 
     edges = [start, *crossings, stop]
-    phases = []
-    for arc_start, arc_stop in zip(edges[:-1], edges[1:]):
-        midpoint = 0.5 * (arc_start + arc_stop)
-        offset = abs(((midpoint + np.pi) % (2.0 * np.pi)) - np.pi)
-        phases.append((arc_start, arc_stop, offset > half_shadow))
-    return phases
+    return [(arc_start, arc_stop, sunlit)
+            for arc_start, arc_stop, sunlit
+            in zip(edges[:-1], edges[1:], sunlit_flags)]
 
 
 def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:

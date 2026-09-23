@@ -65,6 +65,23 @@ class SolarSailSolution:
     true_final_eccentricity: float = np.nan
     accumulated_defect_km: float = np.inf
 
+    #: The same end-to-end propagation, kept at full resolution.  This is what
+    #: the figures draw: a handful of nodes per revolution cannot show what the
+    #: trajectory does between them, and on this problem the interesting
+    #: behaviour (the eccentricity vector turning over, the eclipse crossings)
+    #: happens there.  The nodes are overlaid as markers so the discretisation
+    #: stays visible.
+    dense_longitude_rad: np.ndarray = field(default_factory=lambda: np.empty(0))
+    dense_state: np.ndarray = field(default_factory=lambda: np.empty((0, 6)))
+    dense_steering_angle_rad: np.ndarray = field(default_factory=lambda: np.empty(0))
+    dense_cone_angle_rad: np.ndarray = field(default_factory=lambda: np.empty(0))
+    dense_position_km: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
+    dense_illuminated: np.ndarray = field(default_factory=lambda: np.empty(0, bool))
+    dense_phase_index: np.ndarray = field(default_factory=lambda: np.empty(0, int))
+
+    #: Rate at which the Sun line sweeps about +Z; the shadow follows it.
+    sun_angular_rate_rad_s: float = 0.0
+
     defect_by_state: np.ndarray = field(default_factory=lambda: np.zeros(6))
     defect_history: np.ndarray = field(default_factory=lambda: np.empty(0))
     step_history: np.ndarray = field(default_factory=lambda: np.empty(0))
@@ -90,6 +107,53 @@ class SolarSailSolution:
     @property
     def apogee_radius_km(self) -> np.ndarray:
         return self.semi_latus_km / (1.0 - self.eccentricity)
+
+    # ---- the same quantities along the propagated trajectory -------------
+
+    @property
+    def dense_elapsed_days(self) -> np.ndarray:
+        return self.dense_state[:, 5] / _SECONDS_PER_DAY
+
+    @property
+    def dense_eccentricity(self) -> np.ndarray:
+        return np.hypot(self.dense_state[:, 1], self.dense_state[:, 2])
+
+    @property
+    def dense_semi_latus_km(self) -> np.ndarray:
+        return self.dense_state[:, 0] + self.geo_radius_km
+
+    @property
+    def dense_perigee_radius_km(self) -> np.ndarray:
+        return self.dense_semi_latus_km / (1.0 + self.dense_eccentricity)
+
+    @property
+    def dense_apogee_radius_km(self) -> np.ndarray:
+        return self.dense_semi_latus_km / (1.0 - self.dense_eccentricity)
+
+    @property
+    def dense_radius_km(self) -> np.ndarray:
+        return np.linalg.norm(self.dense_position_km, axis=1)
+
+    @property
+    def dense_acceleration_mm_s2(self) -> np.ndarray:
+        cosine = np.cos(self.dense_cone_angle_rad)
+        pressure = self.solar_pressure_n_m2 * self.area_to_mass_m2_kg
+        epsilon = self.reflectivity
+        magnitude = pressure * cosine * np.sqrt(
+            (1.0 - epsilon) ** 2 + 4.0 * epsilon * cosine**2
+        )
+        return 1.0e3 * np.where(self.dense_illuminated, magnitude, 0.0)
+
+    def sun_direction_at(self, elapsed_seconds) -> np.ndarray:
+        """Earth-to-Sun unit vector at a given elapsed time (or times)."""
+        base = np.asarray(self.sun_direction_eci, dtype=float)
+        base = base / np.linalg.norm(base)
+        angle = np.atleast_1d(self.sun_angular_rate_rad_s * np.asarray(elapsed_seconds, float))
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        out = np.stack([cos_a * base[0] - sin_a * base[1],
+                        sin_a * base[0] + cos_a * base[1],
+                        np.full_like(cos_a, base[2])], axis=-1)
+        return out[0] if np.ndim(elapsed_seconds) == 0 else out
 
     @property
     def radius_km(self) -> np.ndarray:
@@ -132,6 +196,25 @@ def _positions(state: np.ndarray, longitude: np.ndarray,
     q = 1.0 + state[:, 1] * np.cos(longitude) + state[:, 2] * np.sin(longitude)
     semi_latus = state[:, 0] + geo_radius_km
     return (semi_latus / q)[:, None] * radial
+
+
+def _cone_angles_moving(state, longitude, steering, sun_direction,
+                        sun_rate) -> np.ndarray:
+    """Cone angle with the Sun line rotating about +Z as elapsed time advances."""
+    base = np.asarray(sun_direction, float)
+    base = base / np.linalg.norm(base)
+    angle = sun_rate * state[:, 5]
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    sun = np.stack([cos_a * base[0] - sin_a * base[1],
+                    sin_a * base[0] + cos_a * base[1],
+                    np.full_like(cos_a, base[2])], axis=1)
+
+    radial, transverse = _orbital_frame(state, longitude)
+    primer = np.cos(steering)[:, None] * radial + np.sin(steering)[:, None] * transverse
+    sunward = -sun
+    cos_gamma = np.clip(np.sum(primer * sunward, axis=1), -1.0 + 1e-12, 1.0 - 1e-12)
+    sin_gamma = np.sqrt(np.maximum(0.0, 1.0 - cos_gamma**2))
+    return np.arctan2(np.sqrt(cos_gamma**2 + 8.0) - 3.0 * cos_gamma, 4.0 * sin_gamma)
 
 
 def _cone_angles(state, longitude, steering, sun_direction) -> np.ndarray:
@@ -299,14 +382,18 @@ def _chained_propagation(problem):
     this a trajectory the modelled sail could fly", which per-interval defects
     do not.
 
-    Returns ``(true_perigee_km, true_eccentricity, accumulated_defect_km)``.
+    Returns ``(true_perigee_km, true_eccentricity, accumulated_defect_km,
+    dense)``, where ``dense`` holds the full-resolution trajectory the figures
+    are drawn from.
     """
     flags = problem.config.method.flags
     discretize = flags.get("discretize", "ms")
     hp = int(flags.get("hp_segments", 1))
 
     z_end = None
-    for segment in problem.segments.values():
+    dense_state, dense_longitude, dense_control = [], [], []
+    dense_lit, dense_phase = [], []
+    for phase_number, segment in enumerate(problem.segments.values()):
         data = segment.current_iter_data
         z_opt = np.asarray(data.z_opt)
         nu_opt = np.asarray(data.nu_opt)
@@ -323,11 +410,29 @@ def _chained_propagation(problem):
             tau = np.linspace(0.0, 1.0, n_nodes)
 
         z_start = z_opt[0] if z_end is None else z_end
-        _, z_dense, _ = integrators.propagate_trajectory(
+        # ~200 samples per revolution: fine enough to resolve the eccentricity
+        # vector turning over within an orbit, which a handful of nodes cannot
+        n_steps = max(200, 40 * (n_nodes - 1))
+        _, z_dense, nu_dense = integrators.propagate_trajectory(
             np.vstack([z_start, z_opt[1:]]), tau, nu_opt, dynamics, segment.params,
-            discretize=discretize, n_steps=2000, hp_segments=hp,
+            discretize=discretize, n_steps=n_steps, hp_segments=hp,
         )
         z_end = z_dense[-1]
+
+        # drop the shared endpoint so phases concatenate without duplicates
+        keep = slice(None) if not dense_state else slice(1, None)
+        index = segment.index_map.indices
+        scales = np.asarray(segment.nondim.state_scales)
+        dense_state.append(np.asarray(z_dense[keep][:, index.z.state]) * scales)
+        dense_longitude.append(
+            np.asarray(z_dense[keep][:, index.z.time]).reshape(-1)
+            * segment.nondim.time_scale)
+        dense_control.append(
+            np.asarray(nu_dense[keep][:, index.nu.control]).reshape(-1)
+            * float(np.asarray(segment.nondim.control_scales).reshape(-1)[0]))
+        count = dense_state[-1].shape[0]
+        dense_lit.append(np.full(count, bool(segment.params.illumination)))
+        dense_phase.append(np.full(count, phase_number, dtype=int))
 
     last = list(problem.segments.values())[-1]
     scales = np.asarray(last.nondim.state_scales)
@@ -339,8 +444,16 @@ def _chained_propagation(problem):
     # forming the perigee radius
     geo = float(list(problem.segments.values())[0].params.geo_radius_km)
     e_true = float(np.hypot(true[1], true[2]))
+
+    dense = {
+        "state": np.concatenate(dense_state),
+        "longitude": np.concatenate(dense_longitude),
+        "steering": np.concatenate(dense_control),
+        "illuminated": np.concatenate(dense_lit),
+        "phase_index": np.concatenate(dense_phase),
+    }
     return (float((true[0] + geo) / (1.0 + e_true)), e_true,
-            float(claimed[0] - true[0]))
+            float(claimed[0] - true[0]), dense)
 
 
 def _solver_history(problem):
@@ -386,7 +499,15 @@ def extract_solution(problem) -> SolarSailSolution:
 
         trimmed_state, trimmed_longitude, trimmed_control = state, longitude, control
         if previous_state is not None:
-            state_jumps.append(float(np.max(np.abs(state[0] - previous_state))))
+            # Relative to each state's own scale.  The dimensional vector mixes
+            # km, dimensionless elements and seconds -- and elapsed time runs to
+            # ~2e6 s -- so a single absolute threshold on it compares quantities
+            # that share no units and is dominated by whichever has the largest
+            # numbers.  Continuity is enforced hard (vb: none), so what is left
+            # here is round-off and belongs on a scale-relative measure.
+            scales = np.asarray(segment.nondim.state_scales, dtype=float)
+            state_jumps.append(
+                float(np.max(np.abs(state[0] - previous_state) / scales)))
             longitude_jumps.append(float(abs(longitude[0] - previous_longitude)))
             trimmed_state = state[1:]
             trimmed_longitude = longitude[1:]
@@ -408,8 +529,10 @@ def extract_solution(problem) -> SolarSailSolution:
     steering = np.concatenate(controls)
     settings = problem.settings
     sun_direction = np.asarray(settings.sun_direction_eci, dtype=float)
+    sun_rate = float(np.deg2rad(settings.sun_angular_rate_deg_per_day)
+                     / settings.constants.day_s)
     defect_history, step_history, cost_history = _solver_history(problem)
-    true_perigee, true_eccentricity, accumulated = _chained_propagation(problem)
+    true_perigee, true_eccentricity, accumulated, dense = _chained_propagation(problem)
     eps_nd = float(np.atleast_1d(
         list(problem.segments.values())[0].constraints.dynamics.penalty_state.eps)[0])
 
@@ -453,6 +576,17 @@ def extract_solution(problem) -> SolarSailSolution:
         true_final_perigee_km=true_perigee,
         true_final_eccentricity=true_eccentricity,
         accumulated_defect_km=accumulated,
+        dense_longitude_rad=dense["longitude"],
+        dense_state=dense["state"],
+        dense_steering_angle_rad=dense["steering"],
+        dense_cone_angle_rad=_cone_angles_moving(
+            dense["state"], dense["longitude"], dense["steering"],
+            sun_direction, sun_rate),
+        dense_position_km=_positions(dense["state"], dense["longitude"],
+                                     float(settings.constants.geo_radius_km)),
+        dense_illuminated=dense["illuminated"],
+        dense_phase_index=dense["phase_index"],
+        sun_angular_rate_rad_s=sun_rate,
     )
 
 
@@ -560,7 +694,7 @@ def print_validation_report(report: dict) -> None:
     print(f"  per-interval tolerance    : {report['defect_tolerance_nd']:.3e}")
     print(f"  shortest phase            : {report['shortest_phase_h']:.4f} h"
           f"  (all positive: {report['all_phase_durations_positive']})")
-    print(f"  max state jump            : {report['max_state_jump']:.3e}")
+    print(f"  max state jump (relative) : {report['max_state_jump']:.3e}")
     print(f"  max longitude jump        : {report['max_longitude_jump_rad']:.3e} rad")
     print(f"  max dynamics defect       : {report['max_dynamics_defect_nd']:.3e}")
     print(f"  max re-propagation error  : {report['max_propagation_error_nd']:.3e}")
@@ -583,12 +717,17 @@ _ARRAY_FIELDS = (
     "illuminated", "phase_index", "phase_start_rad", "phase_stop_rad", "phase_sunlit",
     "phase_duration_h", "sun_direction_eci", "defect_by_state", "defect_history",
     "step_history", "cost_history",
+    "dense_longitude_rad", "dense_state", "dense_steering_angle_rad",
+    "dense_cone_angle_rad", "dense_position_km", "dense_illuminated",
+    "dense_phase_index",
 )
 _SCALAR_FIELDS = (
     "earth_radius_km", "geo_radius_km", "target_perigee_km", "target_eccentricity",
     "revolutions", "area_to_mass_m2_kg", "solar_pressure_n_m2", "reflectivity",
     "solver_converged", "solver_status", "iterations", "max_state_jump",
     "max_longitude_jump_rad", "max_dynamics_defect_nd", "max_propagation_error_nd",
+    "true_final_perigee_km", "true_final_eccentricity", "accumulated_defect_km",
+    "defect_tolerance_nd", "defect_budget_km", "sun_angular_rate_rad_s",
 )
 
 
@@ -605,6 +744,7 @@ def save_solution(solution: SolarSailSolution, filename: str | Path) -> Path:
 def load_solution(filename: str | Path) -> SolarSailSolution:
     """Load a result previously written by :func:`save_solution`."""
     casts = {"illuminated": bool, "phase_sunlit": bool, "phase_index": int,
+             "dense_illuminated": bool, "dense_phase_index": int,
              "solver_converged": bool, "solver_status": str, "iterations": int,
              "revolutions": int}
     with np.load(filename) as data:

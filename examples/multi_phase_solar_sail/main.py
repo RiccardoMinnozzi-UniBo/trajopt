@@ -24,7 +24,7 @@ from solution import (
     print_validation_report,
     save_solution,
 )
-from visualization import render_all, render_rotating_gif
+from visualization import render_all, render_shadow_animation
 
 EXAMPLE_DIRECTORY = Path(__file__).resolve().parent
 DEFAULT_CONFIG = EXAMPLE_DIRECTORY / "config-ps.yaml"
@@ -85,7 +85,7 @@ def main(config_file: str | Path = DEFAULT_CONFIG) -> None:
     files.extend(render_all(solution, output, report))
 
     if report["numerically_feasible"]:
-        files.append(render_rotating_gif(
+        files.append(render_shadow_animation(
             solution,
             output / config.output.animation_file,
             int(config.output.animation_frames),

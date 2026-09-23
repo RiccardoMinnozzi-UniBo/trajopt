@@ -50,8 +50,15 @@ inherit: config.yaml
 # shows up when the trajectory is re-propagated, and at 10 nodes that leaves a
 # ~7 km drift over 24 revolutions.  18 nodes per sunlit arc removes it.
 problem:
-  sunlit_nodes: 18
-  eclipse_nodes: 6
+  # Collocation needs more points per arc than shooting: the Radau residual is
+  # already tiny at 12 nodes (1.7e-06) while the re-propagated trajectory still
+  # drifts 5.2 km, because the polynomial satisfies the dynamics *at* the nodes
+  # and the interpolation error between them is what a propagator sees.  A mesh
+  # study over 12/3 .. 24/4 put the accumulated defect at 5.240, 0.592, -0.322
+  # and 0.027 km; 24/4 also converges in the fewest iterations (28) and so is
+  # not the slowest despite being the finest.
+  sunlit_nodes: 24
+  eclipse_nodes: 4
 
 method:
   flags:
