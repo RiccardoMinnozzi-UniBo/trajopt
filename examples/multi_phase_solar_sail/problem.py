@@ -55,7 +55,8 @@ from trajopt.utils import tools
 from trajopt.utils.tools import AttrDict, recursive_attrdict
 
 _SOURCE = str(Path(__file__).with_name("solar_sail.py").resolve())
-_STATE_NAMES = ("p", "f", "g", "h", "k", "elapsed_time")
+# The first state is p - r_GEO, not p: see solar_sail.py's module docstring.
+_STATE_NAMES = ("semi_latus_offset", "f", "g", "h", "k", "elapsed_time")
 
 # Shortest arc we ever allow, as a guard against degenerate phases.
 _MIN_ARC_RAD = 0.05
@@ -81,9 +82,8 @@ def _state_box(settings: AttrDict) -> tuple[np.ndarray, np.ndarray]:
     bounds = settings.state_bounds
     constants = settings.constants
 
-    semi_latus = float(constants.geo_radius_km) + np.asarray(
-        bounds.semi_latus_offset_km, dtype=float
-    )
+    # already an offset from r_GEO, which is exactly what the state carries
+    semi_latus = np.asarray(bounds.semi_latus_offset_km, dtype=float)
     eccentricity = np.asarray(bounds.eccentricity_component, dtype=float)
     inclination = np.asarray(bounds.inclination_component, dtype=float)
     elapsed_upper = (
@@ -103,34 +103,81 @@ def _state_scales(lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
     """Scaling factor for each state, from its allowed interval (paper Eq. 44).
 
     The amplitude of the interval is the right scale only for a state that is
-    centred near zero.  trajopt nondimensionalises by division alone, with no
-    offset, so for an interval that does not contain zero the amplitude is the
-    wrong choice: the semi-latus rectum sits at ~42164 km inside an interval
-    only ~700 km wide, and dividing by 700 would leave p_nd ~ 60.  Every
-    absolute nondimensional quantity in the solver -- trust region, penalties,
-    convergence tolerances -- would then be measured against a variable sixty
-    times larger than the motion being resolved, and the dynamics defect stalls
-    around 1e-3 as a result.
+    centred near zero, because trajopt nondimensionalises by division alone
+    with no offset.  Every state here is written so that it is: the semi-latus
+    rectum is carried as an offset from r_GEO rather than as p itself (see
+    solar_sail.py), so its interval straddles zero like the others and the
+    amplitude is the correct scale throughout.
 
-    So: amplitude for intervals straddling zero (f, g, h, k, elapsed time),
-    magnitude for those that do not (p).
+    The magnitude branch below is kept for any state added later whose interval
+    does not contain zero, but nothing in this problem takes it.  Prefer
+    re-centring such a state over relying on it: a scale that does not resolve
+    a state's motion makes its dynamics defect numerically invisible, and the
+    optimiser will spend that defect instead of thrusting.
     """
     amplitude = upper - lower
     magnitude = np.abs(0.5 * (lower + upper))
     return np.where(lower * upper > 0.0, magnitude, amplitude)
 
 
+def defect_tolerance(settings: AttrDict, phases: list) -> float:
+    """Per-interval dynamics-defect tolerance, sized from an accumulated budget.
+
+    The solver bounds the defect of each *interval* -- each adjacent pair of
+    nodes -- not of each phase.  Those errors accumulate along the trajectory,
+    so what matters physically is the sum over every interval in the problem:
+
+        accumulated ~= eps * p_scale * n_intervals
+
+    with ``n_intervals = sum over phases of (num_nodes - 1)``.  Inverting that
+    for a chosen accumulated budget gives the tolerance below.
+
+    Sizing this matters here more than in most problems.  The semi-latus rectum
+    is scaled by its magnitude (~42164 km, see _state_scales), so the default
+    1e-4 tolerance is worth 4.2 km on *every interval*; over the 173 intervals
+    of a three-revolution transfer that permits far more orbit raise than the
+    sail itself delivers (~9 km/day), and the optimiser will spend it.  The
+    budget has to be small against the real effect, not against the state.
+    """
+    budget_km = float(settings.max_accumulated_defect_km)
+    lower, upper = _state_box(settings)
+    p_scale = _state_scales(lower, upper)[0]
+
+    n_intervals = sum(
+        int(settings.sunlit_nodes if sunlit else settings.eclipse_nodes) - 1
+        for _, _, sunlit in phases
+    )
+    return budget_km / p_scale / n_intervals
+
+
 def _initial_state(settings: AttrDict) -> np.ndarray:
-    """Circular equatorial GEO: p = r_GEO, f = g = h = k = 0, t = 0."""
-    return np.array([float(settings.constants.geo_radius_km), 0.0, 0.0, 0.0, 0.0, 0.0])
+    """Circular equatorial GEO: p = r_GEO, i.e. offset 0, and f = g = h = k = t = 0."""
+    del settings
+    return np.zeros(6)
 
 
-def _steering_guess(progress: float, settings: AttrDict) -> float:
-    """Steering angle ramped between the paper's Eq. 53-54 endpoint primers
-    (radial at the start, transverse at the end)."""
+def _steering_guess(progress: float, settings: AttrDict,
+                    longitude: float = 0.0, initial_longitude: float = 0.0) -> float:
+    """Steering angle for the initial guess.
+
+    The base value ramps between the configured endpoint primers.  On top of
+    that the angle *winds*: theta is measured in the rotating local frame, so a
+    primer that is fixed in inertial space -- which is what the optimal solution
+    looks like, the sail being pushed away from a nearly stationary Sun -- turns
+    by -2*pi per revolution in this frame.  Kelly & Bevilacqua Figure 7 shows
+    exactly that: the primer angle sweeps the full circle once per orbit.
+
+    Without the winding term the guess is a constant angle, and SCP is a local
+    method: it stays near the non-winding profile, the sail cannot follow the
+    optimal direction for more than about one revolution, and the eccentricity
+    is pumped instead of being held at the cap.  ``guess.steering_winds_per_rev``
+    scales the term; 0 recovers the old constant-angle guess.
+    """
     start = float(settings.guess.steering_angle_start_rad)
     stop = float(settings.guess.steering_angle_stop_rad)
-    return (1.0 - progress) * start + progress * stop
+    base = (1.0 - progress) * start + progress * stop
+    winds = float(settings.guess.get("steering_winds_per_rev", 1.0))
+    return base - winds * (longitude - initial_longitude)
 
 
 def half_shadow_angle(settings: AttrDict) -> float:
@@ -157,9 +204,23 @@ def phase_boundaries(settings: AttrDict) -> list[tuple[float, float, bool]]:
     stop = start + 2.0 * np.pi * n_rev
     half_shadow = half_shadow_angle(settings)
 
+    # The shadow is centred on the anti-Sun direction, so once the Sun line
+    # moves the eclipse moves with it.  One revolution takes about one orbital
+    # period, which gives the elapsed time at each crossing to the accuracy a
+    # structural guess needs; the shadow_boundary equality then places each
+    # boundary exactly.  Without this the nominal boundaries stay at 2*pi*i
+    # while the true ones drift ~1 deg per day, and after a few revolutions they
+    # fall outside terminator_window_rad and the guess is wrong by more than the
+    # window can absorb.
+    rate = float(settings.sun_angular_rate_deg_per_day) * np.pi / 180.0
+    period_days = 2.0 * np.pi * np.sqrt(
+        float(settings.constants.geo_radius_km) ** 3
+        / float(settings.constants.earth_mu_km3_s2)
+    ) / float(settings.constants.day_s)
+
     crossings = []
     for revolution in range(1, n_rev + 1):
-        centre = 2.0 * np.pi * revolution
+        centre = 2.0 * np.pi * revolution + rate * revolution * period_days
         crossings.extend((centre - half_shadow, centre + half_shadow))
     crossings = [L for L in crossings if start + _MIN_ARC_RAD < L < stop - _MIN_ARC_RAD]
 
@@ -182,6 +243,11 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
         **dict(constants),
         **dict(settings.sail),
         "sun_direction_eci": list(settings.sun_direction_eci),
+        # Earth's orbital motion, as an angular rate of the Sun line about +Z.
+        # Zero recovers the fixed-Sun model.
+        "sun_angular_rate_rad_s": float(
+            np.deg2rad(settings.sun_angular_rate_deg_per_day) / constants.day_s
+        ),
         # 1 in sunlight, 0 in eclipse; multiplies the whole sail acceleration.
         "illumination": 1.0 if sunlit else 0.0,
         "final_eccentricity_max": float(settings.graveyard.eccentricity_max),
@@ -198,6 +264,8 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
             "phase_end_longitude": f"{_SOURCE}:phase_end_longitude",
             "terminal_eccentricity_cone": f"{_SOURCE}:terminal_eccentricity_cone",
             "terminal_perigee_cone": f"{_SOURCE}:terminal_perigee_cone",
+            "terminal_eccentricity": f"{_SOURCE}:terminal_eccentricity",
+            "terminal_perigee_radius": f"{_SOURCE}:terminal_perigee_radius",
         },
         "params": params,
         "state": {
@@ -213,12 +281,19 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
                 "lower": lower.tolist(),
                 "upper": upper.tolist(),
             },
-            # A generous box on the steering angle; it only stops the angle from
-            # winding away by multiples of 2*pi, which would be a null direction.
+            # The steering angle MUST be free to wind.  The locally optimal
+            # primer rotates roughly once per revolution (Kelly & Bevilacqua
+            # Figure 7, where the primer angle sweeps the full circle every
+            # orbit), so over an N-revolution transfer theta sweeps ~2*pi*N.
+            # Bounding it to +/-2*pi caps the primer at one revolution of
+            # winding: beyond that the control saturates, the sail can no longer
+            # follow the optimal direction, and the eccentricity is pumped
+            # secularly instead of being held at the cap.  The box is kept only
+            # to stop the angle running off to infinity.
             "steering_limits": {
                 "type": "control_limits",
-                "lower": [-2.0 * np.pi],
-                "upper": [2.0 * np.pi],
+                "lower": [-2.0 * np.pi * (settings.revolutions + 2)],
+                "upper": [2.0 * np.pi * (settings.revolutions + 2)],
             },
             # A sail cannot slew instantaneously.  Without this the minimum-time
             # optimum is bang-bang: the primer flips by ~180 deg between adjacent
@@ -283,8 +358,13 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
     x0 = _initial_state(settings)
     initial_longitude = phases[0][0]
     total_longitude = phases[-1][1] - initial_longitude
+    constants_geo = float(settings.constants.geo_radius_km)
     window = float(settings.terminator_window_rad)
     freedom = float(settings.final_longitude_freedom_rad)
+
+    # One tolerance for the whole trajectory: the budget is on the accumulated
+    # defect, so it has to be shared out over every interval in every phase.
+    eps_dynamics = defect_tolerance(settings, phases)
 
     segments = AttrDict()
     previous_name = None
@@ -292,6 +372,7 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
     for index, (arc_start, arc_stop, sunlit) in enumerate(phases, start=1):
         name = f"phase_{index:03d}_{'sunlit' if sunlit else 'eclipse'}"
         segment = _build_segment(settings, sunlit)
+        segment.constraints.dynamics.eps = eps_dynamics
         is_last = index == len(phases)
 
         # The guess propagates the true dynamics through each arc in turn and
@@ -303,8 +384,10 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
             "t_start": float(arc_start),
             "t_stop": float(arc_stop),
             "x_start": x0.tolist() if previous_name is None else "previous",
-            "u_start": [_steering_guess(progress_start, settings)],
-            "u_stop": [_steering_guess(progress_stop, settings)],
+            "u_start": [_steering_guess(progress_start, settings,
+                                        arc_start, initial_longitude)],
+            "u_stop": [_steering_guess(progress_stop, settings,
+                                       arc_stop, initial_longitude)],
         })
 
         if previous_name is None:

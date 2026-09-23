@@ -219,14 +219,23 @@ class SCPSegment():
     def create_free_final_time_constraints(self) -> None:
         N = self.index_map.N.all
 
-        # the ps mesh below is built around a fixed node 0
-        if self.flags.discretize == "ps" or not self.inherits_start_epoch():
+        # nothing upstream sets the start epoch, so the grid is anchored at its
+        # guess value; a segment that inherits it leaves node 0 free instead
+        if not self.inherits_start_epoch():
             self.cp_constraints.append(self.dt[0, 0] == 0)
 
         if self.flags.discretize == "ps":
+            # the interior nodes sit on the fixed tau mesh between the two
+            # endpoints, t_k = (1 - tau_k) t_0 + tau_k t_{N-1}, so both endpoints
+            # carry the mesh with them.  ps_t_offset holds the constant of the
+            # linearization, (1 - tau_k) t_ref_0 + tau_k t_ref_{N-1} - t_ref_k.
             tau = self.cp_params.tau
             for k in range(1, N - 1):
-                self.cp_constraints.append(self.dt[k, 0] == self.cp_params.ps_t_offset[k] + tau[k] * self.dt[N - 1, 0])
+                self.cp_constraints.append(
+                    self.dt[k, 0] == self.cp_params.ps_t_offset[k]
+                    + (1.0 - tau[k]) * self.dt[0, 0]
+                    + tau[k] * self.dt[N - 1, 0]
+                )
 
             for k in range(N - 1):
                 self.cp_constraints.append(0.0 <= self.s_ref[k, 0] + self.ds[k, 0])

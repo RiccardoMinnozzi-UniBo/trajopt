@@ -37,7 +37,7 @@ problem:
   #
   # Everything else in this file is shared between the two; only this changes.
   # Setting it close to the expected answer just makes the search cheaper.
-  revolutions: 4
+  revolutions: 24
 
   # How far the final arc may be stretched or shortened past its nominal end,
   # in radians.  About one revolution of slack gives the minimum-time cost a
@@ -79,10 +79,28 @@ problem:
   # at the initial time, as in the reference.
   initial_longitude_rad: "${np.pi}"
 
+  # Largest total dynamics defect the returned trajectory may carry, in km of
+  # semi-latus rectum, accumulated over every interval of every phase.
+  #
+  # This is the setting that decides whether the answer is real.  trajopt bounds
+  # the defect of each interval, and those errors add up along the trajectory;
+  # the sail itself only raises the orbit by about 9 km per day, so a budget
+  # that is large next to that lets the optimiser "reach" the graveyard orbit
+  # by accumulating defect rather than by thrusting.  At the 1e-4 default --
+  # 4.2 km per interval, because the semi-latus rectum is scaled by its own
+  # magnitude -- a three-revolution transfer took 86 % of its orbit raise from
+  # accumulated defect and still reported convergence.
+  #
+  # 10 km is comfortably below the physically achievable raise over any
+  # transfer long enough to matter.  problem.defect_tolerance() turns it into
+  # the per-interval eps, dividing by the interval count, so the budget stays
+  # fixed as the revolution count and the node counts change.
+  max_accumulated_defect_km: 3.0
+
   # Nodes per arc, both endpoints included.  Eclipse arcs are short (about
   # 17.4 deg) and carry no control authority, so they need far fewer nodes.
-  sunlit_nodes: 36
-  eclipse_nodes: 12
+  sunlit_nodes: 10
+  eclipse_nodes: 4
 
   constants:
     earth_mu_km3_s2: 398600.436233
@@ -91,7 +109,7 @@ problem:
     day_s:           86400.0
 
   sail:
-    area_to_mass_m2_kg:  1.0        # A/m of the sail-craft
+    area_to_mass_m2_kg:  10.0        # A/m of the sail-craft
     solar_pressure_n_m2: 4.5391e-6   # solar radiation pressure at 1 AU
     reflectivity:        1.0         # 1.0 = perfect specular reflector
 
@@ -116,6 +134,18 @@ problem:
   # Earth-to-Sun unit vector in ECI.  [-1, 0, 0] places the Sun in the
   # equatorial plane, which keeps the whole problem planar.
   sun_direction_eci: [-1.0, 0.0, 0.0]
+
+  # Rate at which the Sun line sweeps about +Z, i.e. the Earth's orbital motion.
+  # 360 deg / 365.25 d = 0.9856 deg/day.  Set to 0.0 for the fixed Sun.
+  #
+  # This is what makes the dynamics non-autonomous: the sail acceleration now
+  # depends on the elapsed-time state, not only on where the spacecraft is.  It
+  # matters because a sail can only be pushed away from the Sun, so with the Sun
+  # fixed the thrust is confined to a half-space that is also fixed in inertial
+  # space, and the eccentricity vector is pumped secularly.  Letting the Sun move
+  # rotates that half-space, which is how the reference keeps eccentricity in
+  # check over its 90-revolution transfer.
+  sun_angular_rate_deg_per_day: 0.9856
 
   # Terminal graveyard orbit, per the IADC guidelines (Table B2 in the paper):
   # near-circular, safely above the geostationary belt.
@@ -166,8 +196,8 @@ problem:
   # rather than written out, which is what keeps the revolution count the only
   # thing that changes between sail sizings.
   state_bounds:
-    semi_latus_offset_km:    [-100.0, 600.0]   # relative to r_GEO
-    eccentricity_component:  [-0.004, 0.004]   # f and g
+    semi_latus_offset_km:    [0.0, 1000.0]     # relative to r_GEO (paper Eq. 44)
+    eccentricity_component:  [-0.01, 0.01]     # f and g (paper Eq. 44)
     inclination_component:   [-0.1, 0.1]       # h and k (stay at 0: planar)
     days_per_revolution_bound: 1.2             # a revolution takes ~1.0 day;
                                                # this bounds the elapsed time
@@ -193,9 +223,17 @@ method:
   inherit: trajopt/methods/dev/sqp/configs/autoscvx.yaml
 
   flags:
+    # Convergence tests two things: that the iteration has stopped moving
+    # (eps_state) and that every constraint buffer is satisfied (each
+    # constraint's own eps).  They answer different questions, so they get
+    # different numbers -- the defect tolerance is set from
+    # problem.max_accumulated_defect_km and is far tighter than is sensible
+    # as a "has the solution settled" threshold.
+    eps_state:    [1.0e-4]
     equal_dt:     1
     zoh_dilation: 1
-    second_order: 0     # first-order SCP: cheaper per iteration
+    second_order: 1     # second-order: reaches its final accuracy in ~100
+                        # iterations where first-order needs thousands
     nsub:         6     # RK4 substeps per multiple-shooting interval
     iter_max:     600
     quiet:        0
@@ -220,6 +258,13 @@ method:
         penalty: True
         autotune: True
         init: 100.0
+
+    # The initial state is a linear constraint on the first node and the guess
+    # satisfies it exactly, so it needs no slack.  Left buffered, it is the
+    # cheapest place for the optimiser to find the perigee it cannot earn: the
+    # trajectory simply starts above GEO and "reaches" the graveyard for free.
+    initial_state:
+      vb: none
 
     # The guess is propagated arc by arc and chained, so it is exactly
     # continuous already, and all three continuity constraints are linear.

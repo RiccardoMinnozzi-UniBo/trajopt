@@ -9,6 +9,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from trajopt.methods.common import integrators, pseudospectral
 from trajopt.utils.tools import recursive_attrdict
 
 import solar_sail
@@ -52,6 +53,18 @@ class SolarSailSolution:
     max_dynamics_defect_nd: float
     max_propagation_error_nd: float
 
+    #: Tolerance the solve was actually held to, and the budget it came from.
+    defect_tolerance_nd: float = 1.0e-4
+    defect_budget_km: float = np.inf
+
+    #: End-to-end check: the trajectory re-integrated from the true initial
+    #: state, never resetting to the optimizer's nodes.  ``accumulated_*`` is
+    #: what the solver claims minus what the dynamics actually deliver -- the
+    #: orbit raise that came from defect rather than from the sail.
+    true_final_perigee_km: float = np.nan
+    true_final_eccentricity: float = np.nan
+    accumulated_defect_km: float = np.inf
+
     defect_by_state: np.ndarray = field(default_factory=lambda: np.zeros(6))
     defect_history: np.ndarray = field(default_factory=lambda: np.empty(0))
     step_history: np.ndarray = field(default_factory=lambda: np.empty(0))
@@ -66,12 +79,17 @@ class SolarSailSolution:
         return np.hypot(self.state[:, 1], self.state[:, 2])
 
     @property
+    def semi_latus_km(self) -> np.ndarray:
+        """Absolute semi-latus rectum; the state carries it offset from r_GEO."""
+        return self.state[:, 0] + self.geo_radius_km
+
+    @property
     def perigee_radius_km(self) -> np.ndarray:
-        return self.state[:, 0] / (1.0 + self.eccentricity)
+        return self.semi_latus_km / (1.0 + self.eccentricity)
 
     @property
     def apogee_radius_km(self) -> np.ndarray:
-        return self.state[:, 0] / (1.0 - self.eccentricity)
+        return self.semi_latus_km / (1.0 - self.eccentricity)
 
     @property
     def radius_km(self) -> np.ndarray:
@@ -108,10 +126,12 @@ def _orbital_frame(state: np.ndarray, longitude: np.ndarray):
     return cosine * ex + sine * ey, -sine * ex + cosine * ey
 
 
-def _positions(state: np.ndarray, longitude: np.ndarray) -> np.ndarray:
+def _positions(state: np.ndarray, longitude: np.ndarray,
+               geo_radius_km: float) -> np.ndarray:
     radial, _ = _orbital_frame(state, longitude)
     q = 1.0 + state[:, 1] * np.cos(longitude) + state[:, 2] * np.sin(longitude)
-    return (state[:, 0] / q)[:, None] * radial
+    semi_latus = state[:, 0] + geo_radius_km
+    return (semi_latus / q)[:, None] * radial
 
 
 def _cone_angles(state, longitude, steering, sun_direction) -> np.ndarray:
@@ -239,7 +259,7 @@ def phase_timing_report(problem, title: str) -> None:
               f"{[row['number'] for row in negative]}")
 
 
-_STATE_NAMES = ("p", "f", "g", "h", "k", "t_elapsed")
+_STATE_NAMES = ("dp", "f", "g", "h", "k", "t_elapsed")
 
 
 def defect_breakdown(problem) -> list[tuple[str, str, float]]:
@@ -263,6 +283,64 @@ def defect_breakdown(problem) -> list[tuple[str, str, float]]:
                 worst[state_name] = (value, name)
     return [(state, segment, value)
             for state, (value, segment) in worst.items()]
+
+
+def _chained_propagation(problem):
+    """Re-integrate the whole trajectory from the true initial state.
+
+    ``_propagation_error`` restarts at every node, so per-interval defects never
+    add up and it cannot see a trajectory that drifts.  Here each phase is
+    propagated from where the *previous* phase actually ended -- never resetting
+    to the optimizer's nodes -- with the control model belonging to the
+    discretization in use (Lagrange through the Radau nodes for collocation,
+    first-order hold for multiple shooting).
+
+    This is the check that decides whether the answer is real: it answers "is
+    this a trajectory the modelled sail could fly", which per-interval defects
+    do not.
+
+    Returns ``(true_perigee_km, true_eccentricity, accumulated_defect_km)``.
+    """
+    flags = problem.config.method.flags
+    discretize = flags.get("discretize", "ms")
+    hp = int(flags.get("hp_segments", 1))
+
+    z_end = None
+    for segment in problem.segments.values():
+        data = segment.current_iter_data
+        z_opt = np.asarray(data.z_opt)
+        nu_opt = np.asarray(data.nu_opt)
+        n_nodes = z_opt.shape[0]
+
+        dynamics = next(c for c in segment.segment.constraints.values()
+                        if c.type == "dynamics").fcn_znu
+
+        if discretize == "ps":
+            operator = (pseudospectral.flipped_radau_hp_operator(n_nodes - 1, hp) if hp > 1
+                        else pseudospectral.flipped_radau_differential_operator(n_nodes - 1))
+            tau = (operator[1] + 1.0) / 2.0
+        else:
+            tau = np.linspace(0.0, 1.0, n_nodes)
+
+        z_start = z_opt[0] if z_end is None else z_end
+        _, z_dense, _ = integrators.propagate_trajectory(
+            np.vstack([z_start, z_opt[1:]]), tau, nu_opt, dynamics, segment.params,
+            discretize=discretize, n_steps=2000, hp_segments=hp,
+        )
+        z_end = z_dense[-1]
+
+    last = list(problem.segments.values())[-1]
+    scales = np.asarray(last.nondim.state_scales)
+    idx = last.index_map.indices.z.state
+    claimed = np.asarray(last.current_iter_data.z_opt[-1, idx]) * scales
+    true = np.asarray(z_end[idx]) * scales
+
+    # the state carries p - r_GEO, so restore the absolute value before
+    # forming the perigee radius
+    geo = float(list(problem.segments.values())[0].params.geo_radius_km)
+    e_true = float(np.hypot(true[1], true[2]))
+    return (float((true[0] + geo) / (1.0 + e_true)), e_true,
+            float(claimed[0] - true[0]))
 
 
 def _solver_history(problem):
@@ -331,13 +409,17 @@ def extract_solution(problem) -> SolarSailSolution:
     settings = problem.settings
     sun_direction = np.asarray(settings.sun_direction_eci, dtype=float)
     defect_history, step_history, cost_history = _solver_history(problem)
+    true_perigee, true_eccentricity, accumulated = _chained_propagation(problem)
+    eps_nd = float(np.atleast_1d(
+        list(problem.segments.values())[0].constraints.dynamics.penalty_state.eps)[0])
 
     return SolarSailSolution(
         longitude_rad=longitude,
         state=state,
         steering_angle_rad=steering,
         cone_angle_rad=_cone_angles(state, longitude, steering, sun_direction),
-        position_km=_positions(state, longitude),
+        position_km=_positions(state, longitude,
+                               float(settings.constants.geo_radius_km)),
         illuminated=np.concatenate(illuminated),
         phase_index=np.concatenate(phase_indices),
         phase_start_rad=np.array(phase_start),
@@ -366,11 +448,24 @@ def extract_solution(problem) -> SolarSailSolution:
         defect_history=defect_history,
         step_history=step_history,
         cost_history=cost_history,
+        defect_tolerance_nd=eps_nd,
+        defect_budget_km=float(settings.max_accumulated_defect_km),
+        true_final_perigee_km=true_perigee,
+        true_final_eccentricity=true_eccentricity,
+        accumulated_defect_km=accumulated,
     )
 
 
 def validation_report(solution: SolarSailSolution) -> dict:
-    """Independent checks on the returned trajectory."""
+    """Independent checks on the returned trajectory.
+
+    The graveyard requirement is judged on the *propagated* orbit, not on the
+    node values the optimizer reports.  Those differ by the accumulated defect,
+    and on this problem that difference can be most of the transfer: a solve
+    whose nodes sit exactly on the target can propagate to an orbit that never
+    reaches it.  Asking only whether the nodes satisfy the constraint is asking
+    the optimizer to mark its own work.
+    """
     final_perigee = float(solution.perigee_radius_km[-1])
     final_eccentricity = float(solution.eccentricity[-1])
     shortest_phase = float(np.min(solution.phase_duration_h))
@@ -379,17 +474,34 @@ def validation_report(solution: SolarSailSolution) -> dict:
     perigee_met = final_perigee >= solution.target_perigee_km - 0.1
     eccentricity_met = final_eccentricity <= solution.target_eccentricity + 1.0e-6
     graveyard_met = perigee_met and eccentricity_met
+
+    # the same two tests, on the trajectory the dynamics actually produce
+    true_perigee_met = solution.true_final_perigee_km >= solution.target_perigee_km - 0.1
+    true_eccentricity_met = (solution.true_final_eccentricity
+                             <= solution.target_eccentricity + 1.0e-6)
+    true_graveyard_met = true_perigee_met and true_eccentricity_met
+
+    within_budget = abs(solution.accumulated_defect_km) <= solution.defect_budget_km
     phases_positive = shortest_phase > 0.0
 
     feasible = (
-        graveyard_met
+        solution.solver_converged
+        and true_graveyard_met
+        and within_budget
         and phases_positive
         and solution.max_state_jump <= 1.0e-4
         and solution.max_longitude_jump_rad <= 1.0e-8
-        and solution.max_dynamics_defect_nd <= 1.0e-4
+        and solution.max_dynamics_defect_nd <= solution.defect_tolerance_nd
         and solution.max_propagation_error_nd <= 1.0e-3
     )
     return {
+        "true_final_perigee_km": solution.true_final_perigee_km,
+        "true_final_eccentricity": solution.true_final_eccentricity,
+        "true_graveyard_reached": true_graveyard_met,
+        "accumulated_defect_km": solution.accumulated_defect_km,
+        "defect_budget_km": solution.defect_budget_km,
+        "within_defect_budget": within_budget,
+        "defect_tolerance_nd": solution.defect_tolerance_nd,
         "revolutions": solution.revolutions,
         "solver_converged": solution.solver_converged,
         "solver_status": solution.solver_status,
@@ -413,7 +525,7 @@ def validation_report(solution: SolarSailSolution) -> dict:
         "max_propagation_error_nd": solution.max_propagation_error_nd,
         "defect_by_state": dict(zip(_STATE_NAMES, solution.defect_by_state.tolist())),
         "peak_semi_latus_offset_km": float(
-            np.max(np.abs(solution.state[:, 0] - solution.geo_radius_km))
+            np.max(np.abs(solution.state[:, 0]))
         ),
         "peak_eccentricity_component": float(np.max(np.abs(solution.state[:, 1:3]))),
         "peak_eccentricity": float(np.max(solution.eccentricity)),
@@ -435,7 +547,17 @@ def print_validation_report(report: dict) -> None:
     print(f"  final perigee radius      : {report['final_perigee_km']:.3f} km"
           f"  (target >= {report['target_perigee_km']:.3f})  "
           f"met: {report['perigee_met']}")
-    print(f"  graveyard reached         : {report['graveyard_reached']}")
+    print(f"  graveyard reached (nodes) : {report['graveyard_reached']}")
+    print(f"  --- propagated from the true initial state ---")
+    print(f"  true final perigee radius : {report['true_final_perigee_km']:.3f} km"
+          f"  (target >= {report['target_perigee_km']:.3f})"
+          f"  shortfall {report['target_perigee_km'] - report['true_final_perigee_km']:+.3f} km")
+    print(f"  true final eccentricity   : {report['true_final_eccentricity']:.6f}")
+    print(f"  TRUE graveyard reached    : {report['true_graveyard_reached']}")
+    print(f"  accumulated defect        : {report['accumulated_defect_km']:.3f} km"
+          f"  (budget {report['defect_budget_km']:.1f})"
+          f"  within: {report['within_defect_budget']}")
+    print(f"  per-interval tolerance    : {report['defect_tolerance_nd']:.3e}")
     print(f"  shortest phase            : {report['shortest_phase_h']:.4f} h"
           f"  (all positive: {report['all_phase_durations_positive']})")
     print(f"  max state jump            : {report['max_state_jump']:.3e}")

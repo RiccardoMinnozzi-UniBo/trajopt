@@ -195,7 +195,7 @@ def render_elements(solution: SolarSailSolution, path: str | Path,
 
         axis = axes[2]
         _shade_eclipses(axis, eclipses)
-        axis.plot(days, solution.state[:, 0] - solution.geo_radius_km,
+        axis.plot(days, solution.state[:, 0],
                   color=GREEN)
         axis.set_ylabel(r"$p - r_{\mathrm{GEO}}$ [km]")
         axis.set_title("Semi-latus rectum")
@@ -562,7 +562,7 @@ def render_summary(solution: SolarSailSolution, path: str | Path,
 
         axis = figure.add_subplot(grid[0, 2])
         _shade_eclipses(axis, eclipses)
-        axis.plot(days, solution.state[:, 0] - solution.geo_radius_km, color=GREEN)
+        axis.plot(days, solution.state[:, 0], color=GREEN)
         axis.set_ylabel(r"$p - r_{\mathrm{GEO}}$ [km]")
         axis.set_title("Semi-latus rectum")
 

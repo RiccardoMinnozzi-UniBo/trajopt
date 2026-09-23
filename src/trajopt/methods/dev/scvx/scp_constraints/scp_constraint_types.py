@@ -27,15 +27,26 @@ class scp_dynamics(SCPConstraint):
             H = int(getattr(scp_segment.flags, 'hp_segments', 1))
 
             if H > 1:
-                _, etau, _, D_local = pseudospectral.flipped_radau_hp_operator(N_col, H)
+                _, etau, w, D_local = pseudospectral.flipped_radau_hp_operator(N_col, H)
                 self.ps_D = D_local
                 self.ps_hp = H
                 self.ps_p = N_col // H
             else:
-                _, etau, _, D_np = pseudospectral.flipped_radau_differential_operator(N_col)
+                _, etau, w, D_np = pseudospectral.flipped_radau_differential_operator(N_col)
                 self.ps_D = D_np
                 self.ps_hp = 1
                 self.ps_p = N_col
+
+            # Collocation states a residual on dz/dtau, whereas multiple shooting
+            # states one on the state change across an interval, so the two are
+            # not the same size for the same trajectory error and cannot share a
+            # tolerance.  The Radau weights are the measure each collocation node
+            # carries: halved onto tau in [0, 1] they sum to 1, exactly as the
+            # shooting intervals do, so weighting by them puts the collocation
+            # residual back into interval-error units.  This rescales what is
+            # reported and tested for convergence, not what is optimized.
+            self.ps_quad_weight = (np.asarray(w) / 2.0).reshape(-1, 1)
+            self.residual_scale = self.ps_quad_weight
 
             self.ps_etau = etau
             self.ps_tau_norm = (etau + 1.0) / 2.0
@@ -164,7 +175,7 @@ class scp_dynamics(SCPConstraint):
             lhs = jnp.concatenate(lhs_parts, axis=0)
 
             f_vals = self.dyn_fcn_batched(z_jnp[1:], nu_jnp[1:], scp_segment.params)
-            scp_segment.current_iter_data.defect = np.asarray(lhs - f_vals)
+            scp_segment.current_iter_data.defect = np.asarray(lhs - f_vals) * self.ps_quad_weight
 
         if scp_segment.flags.discretize == "ms":
             ks         = jnp.arange(scp_segment.index_map.N.all - 1)

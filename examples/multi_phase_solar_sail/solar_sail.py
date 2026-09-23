@@ -3,8 +3,24 @@
 State and independent variable follow Kelly and Bevilacqua (2021) after their
 change of independent variable from physical time to true longitude::
 
-    x = [p, f, g, h, k, elapsed_time]        (km, -, -, -, -, s)
+    x = [dp, f, g, h, k, elapsed_time]       (km, -, -, -, -, s)
     independent variable: L, the true longitude (rad)
+
+The first state is the semi-latus rectum measured **from the geostationary
+radius**, ``dp = p - r_GEO``, not the semi-latus rectum itself.  The absolute
+value never leaves this module: :func:`semi_latus_rectum` reconstitutes it
+wherever the dynamics need it.
+
+The offset is what makes the problem solvable.  trajopt nondimensionalises by
+division with no offset, so a state confined to a narrow band far from zero
+cannot be given a scale that resolves its motion: p sits at ~42164 km inside a
+700 km band, so any scale is either its magnitude (leaving the motion at the
+1e-2 level of the variable) or the band (leaving p_nd ~ 60).  Under the former
+a dynamics defect that is numerically negligible is physically large, and the
+optimiser will buy orbit raise with it -- the penalty is quadratic in a
+residual that the scaling has made tiny, so no weight can make it expensive.
+Centring the state on zero puts the band and the variable on the same scale and
+the penalty works as intended.
 
 The single control is the **steering angle** ``theta``: the direction of the
 paper's primer vector in the local orbital frame,
@@ -46,10 +62,16 @@ def orbital_frame(h, k, longitude):
     return radial, transverse, jnp.cross(radial, transverse)
 
 
-def position_eci(x, longitude):
+def semi_latus_rectum(x, params):
+    """Absolute semi-latus rectum from the offset carried in the state."""
+    return x[0] + params.geo_radius_km
+
+
+def position_eci(x, longitude, params):
     """Spacecraft position in ECI coordinates, in km."""
     longitude = _scalar_longitude(longitude)
-    p, f, g = x[0], x[1], x[2]
+    p = semi_latus_rectum(x, params)
+    f, g = x[1], x[2]
     q = 1.0 + f * jnp.cos(longitude) + g * jnp.sin(longitude)
     radial, _, _ = orbital_frame(x[3], x[4], longitude)
     return (p / q) * radial
@@ -61,15 +83,40 @@ def _unit_vector(vector, fallback):
     return jnp.where(squared_norm > 1.0e-24, vector / safe_norm, fallback)
 
 
-def light_direction(params):
+def sun_direction(x, params):
+    """Earth-to-Sun unit vector at the spacecraft's elapsed time.
+
+    ``params.sun_direction_eci`` fixes the direction at t = 0 and
+    ``params.sun_angular_rate_rad_s`` rotates it about +Z, the simplest model of
+    the Earth's orbital motion: one revolution of the Sun line per year, in the
+    equatorial plane so the problem stays planar.  A rate of zero recovers the
+    fixed-Sun model exactly.
+
+    This is what makes the dynamics non-autonomous.  The elapsed time is carried
+    as state x[5], so the dependence is on a state rather than on the
+    independent variable (which here is the true longitude), and nothing about
+    trajopt's formulation has to change: the Jacobians simply pick up a d/dx[5]
+    column that was previously zero.
+    """
+    base = jnp.asarray(params.sun_direction_eci, dtype=float)
+    base = base / jnp.linalg.norm(base)
+    angle = params.sun_angular_rate_rad_s * x[5]
+    cos_a, sin_a = jnp.cos(angle), jnp.sin(angle)
+    return jnp.array([
+        cos_a * base[0] - sin_a * base[1],
+        sin_a * base[0] + cos_a * base[1],
+        base[2],
+    ])
+
+
+def light_direction(x, params):
     """Unit vector along photon travel, i.e. pointing away from the Sun.
 
-    ``params.sun_direction_eci`` is the Earth-to-Sun direction, so sunlight
-    travels along its negative.  Every sail quantity below is referred to this
-    direction: a sail can only ever be pushed along it, never against it.
+    Sunlight travels along the negative of the Earth-to-Sun direction.  Every
+    sail quantity below is referred to this direction: a sail can only ever be
+    pushed along it, never against it.
     """
-    sun_direction = jnp.asarray(params.sun_direction_eci)
-    return -sun_direction / jnp.linalg.norm(sun_direction)
+    return -sun_direction(x, params)
 
 
 def sail_normal_from_primer(x, u, longitude, params):
@@ -84,7 +131,7 @@ def sail_normal_from_primer(x, u, longitude, params):
     radial, transverse, _ = orbital_frame(x[3], x[4], longitude)
     primer = jnp.cos(u[0]) * radial + jnp.sin(u[0]) * transverse
 
-    sunward = light_direction(params)
+    sunward = light_direction(x, params)
 
     # Avoid the coordinate singularities at exactly parallel/antiparallel
     # vectors.  The 1e-10 clipping changes the angle by less than 1e-3 deg but
@@ -129,7 +176,7 @@ def solar_sail_acceleration_lvlh(x, u, longitude, params):
     )  # N/kg -> km/s^2
 
     epsilon = params.reflectivity
-    sunward = light_direction(params)
+    sunward = light_direction(x, params)
     cosine = jnp.cos(alpha)
 
     acceleration_eci = (
@@ -152,7 +199,8 @@ def dynamics(x, u, longitude, params, fcns):
     """Modified-equinoctial dynamics with longitude as the independent variable."""
     del fcns
     longitude = _scalar_longitude(longitude)
-    p, f, g, h, k = x[:5]
+    p = semi_latus_rectum(x, params)
+    f, g, h, k = x[1], x[2], x[3], x[4]
     mu = params.earth_mu_km3_s2
 
     cosine = jnp.cos(longitude)
@@ -221,8 +269,8 @@ def shadow_boundary(x, u, longitude, params):
     is what keeps each boundary on the root it belongs to.
     """
     del u
-    position = position_eci(x, longitude)
-    sunward = light_direction(params)
+    position = position_eci(x, longitude, params)
+    sunward = light_direction(x, params)
     axial = jnp.dot(position, sunward)
     transverse_squared = jnp.dot(position, position) - axial**2
     radius_squared = params.earth_radius_km**2
@@ -239,6 +287,19 @@ def phase_end_longitude(x, u, longitude, params):
 # terminal (graveyard) conditions -- exact convex cones for CVXPY
 # ---------------------------------------------------------------------------
 
+def terminal_eccentricity(x, u, longitude, params):
+    """Final eccentricity, for a buffered terminal inequality."""
+    del u, longitude, params
+    return jnp.atleast_1d(jnp.linalg.norm(x[1:3]))
+
+
+def terminal_perigee_radius(x, u, longitude, params):
+    """Final perigee radius in km, for a buffered terminal inequality."""
+    del u, longitude
+    eccentricity = jnp.linalg.norm(x[1:3])
+    return jnp.atleast_1d(semi_latus_rectum(x, params) / (1.0 + eccentricity))
+
+
 def terminal_eccentricity_cone(x, u, params):
     """Exact convex form of ``e_f <= e_max``."""
     del u
@@ -253,4 +314,6 @@ def terminal_perigee_cone(x, u, params):
     """
     del u
     target = float(params.final_perigee_radius_km)
-    return target * (1.0 + cp.norm(x[:, 1:3], axis=1)) - x[:, 0]
+    # x[:, 0] carries p - r_GEO, so the absolute p is restored here
+    return (target * (1.0 + cp.norm(x[:, 1:3], axis=1))
+            - (x[:, 0] + float(params.geo_radius_km)))

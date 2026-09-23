@@ -44,6 +44,15 @@ inherit: config.yaml
 # where it is written down.  Only the discretisation and the output directory
 # differ below.
 
+# Collocation needs more points per arc than shooting does here.  The Radau
+# residual at 10 nodes is already tiny (5e-07), but the polynomial only
+# satisfies the dynamics *at* the nodes; between them the interpolation error
+# shows up when the trajectory is re-propagated, and at 10 nodes that leaves a
+# ~7 km drift over 24 revolutions.  18 nodes per sunlit arc removes it.
+problem:
+  sunlit_nodes: 18
+  eclipse_nodes: 6
+
 method:
   flags:
     discretize: ps

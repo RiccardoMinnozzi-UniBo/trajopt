@@ -176,14 +176,25 @@ class SCPConstraint():
         if self.penalty.dual.autotune:
             penalties.autotune_dual(self.penalty_state)
 
+    #: Per-row factor turning the buffer into the quantity ``eps`` is stated in.
+    #: 1.0 unless a discretization measures its residual in other units; the
+    #: pseudospectral dynamics set it to the quadrature weights so a derivative
+    #: residual is compared as the interval error a shooting defect would be.
+    residual_scale = 1.0
+
+    @property
+    def scaled_vb(self):
+        """Virtual buffer in the units ``penalty_state.eps`` is expressed in."""
+        return self.penalty_state.vb * self.residual_scale
+
     @property
     def vb_ratio(self):
         if self.penalty_state.vb.size == 0:
             return 0.0
-        return float(np.max(np.abs(self.penalty_state.vb) / self.penalty_state.eps))
+        return float(np.max(np.abs(self.scaled_vb) / self.penalty_state.eps))
 
     @property
     def is_feasible(self):
         if self.penalty_state.vb.size == 0:
             return True
-        return bool(np.all(np.abs(self.penalty_state.vb) <= self.penalty_state.eps))
+        return bool(np.all(np.abs(self.scaled_vb) <= self.penalty_state.eps))

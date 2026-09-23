@@ -11,7 +11,7 @@ from trajopt.methods.common import convergence
 from trajopt.methods.common import trust_region
 import trajopt.methods.dev.sqp.scp_constraints.scp_constraint_types as scp_constraint_type_module
 import trajopt.methods.dev.sqp.scp_costs.scp_cost_types as scp_cost_type_module
-from trajopt.utils.tools import AttrDict, recursive_attrdict
+from trajopt.utils.tools import AttrDict, recursive_attrdict, expand_to_array_if_scalar
 
 class SCPSegment():
 
@@ -107,7 +107,11 @@ class SCPSegment():
         dyn = next((c for c in self.constraints.values() if c.type == "dynamics"), None)
         self.eps_dyn   = dyn.penalty_state.eps.copy() if dyn is not None else np.full(self.index_map.n.z, 1e-4)
         self.eps_dyn[self.index_map.indices.z.running_cost] = np.inf
-        self.eps_state = self.eps_dyn[self.index_map.indices.z.state]
+        # the step tolerance is its own setting: the defect tolerance says how
+        # closely the dynamics must hold, which is not the same question as how
+        # small a step means the iteration has stopped moving
+        self.eps_state = expand_to_array_if_scalar(
+            getattr(self.flags, 'eps_state', 1e-4), self.index_map.n.state)
         self.eps_cost  = np.atleast_1d(1e-4)
 
         initial_guess.set_initial_guess(segment, self)
@@ -216,14 +220,23 @@ class SCPSegment():
     def create_free_final_time_constraints(self) -> None:
         N = self.index_map.N.all
 
-        # the ps mesh below is built around a fixed node 0
-        if self.flags.discretize == "ps" or not self.inherits_start_epoch():
+        # nothing upstream sets the start epoch, so the grid is anchored at its
+        # guess value; a segment that inherits it leaves node 0 free instead
+        if not self.inherits_start_epoch():
             self.cp_constraints.append(self.dt[0, 0] == 0)
 
         if self.flags.discretize == "ps":
+            # the interior nodes sit on the fixed tau mesh between the two
+            # endpoints, t_k = (1 - tau_k) t_0 + tau_k t_{N-1}, so both endpoints
+            # carry the mesh with them.  ps_t_offset holds the constant of the
+            # linearization, (1 - tau_k) t_ref_0 + tau_k t_ref_{N-1} - t_ref_k.
             tau = self.cp_params.tau
             for k in range(1, N - 1):
-                self.cp_constraints.append(self.dt[k, 0] == self.cp_params.ps_t_offset[k] + tau[k] * self.dt[N - 1, 0])
+                self.cp_constraints.append(
+                    self.dt[k, 0] == self.cp_params.ps_t_offset[k]
+                    + (1.0 - tau[k]) * self.dt[0, 0]
+                    + tau[k] * self.dt[N - 1, 0]
+                )
 
             for k in range(N - 1):
                 self.cp_constraints.append(0.0 <= self.s_ref[k, 0] + self.ds[k, 0])
