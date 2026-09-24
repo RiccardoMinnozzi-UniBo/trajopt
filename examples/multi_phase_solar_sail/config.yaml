@@ -30,14 +30,25 @@ problem:
   # the final arc ends wherever the minimum-time solution wants it to.
   # This is only a STARTING GUESS.  main.py searches over the revolution count
   # and brackets the minimum from here, so a wrong value costs extra solves but
-  # never the right answer.  Minima found by that search:
+  # never the right answer.
   #
-  #     area_to_mass_m2_kg = 10  ->  revolutions = 1   (3 phases, ~1.23 days)
-  #     area_to_mass_m2_kg =  1  ->  revolutions = 3   (7 phases, ~2.67 days)
+  # 23 is the verified minimum for the shipped sail, and both discretisations
+  # reach it: MS in 23 iterations and PS in 29, with the graveyard met on the
+  # independently propagated trajectory.  22 fails for both, and fails on
+  # opposite criteria -- MS converges but the propagated orbit misses the
+  # eccentricity cap, PS reaches the graveyard but never converges, hitting the
+  # iteration cap with a defect two orders of magnitude above budget.  The
+  # iteration count goes 23/29 at 23 revolutions to 558/600 at 22, so the
+  # feasible set ends abruptly here rather than degrading.
   #
-  # Everything else in this file is shared between the two; only this changes.
+  # Why not fewer: a transfer ends only at the end of a sunlit arc, and the
+  # final arc's window caps the end at L = 2*pi*(revolutions + 1).  Dropping one
+  # revolution therefore removes a whole 2*pi of thrusting, not a marginal
+  # amount.  At 23 the cap is L = 150.796, just below the true 24th shadow
+  # entry at L ~ 151.07, so the final arc is genuinely sunlit.
+  #
   # Setting it close to the expected answer just makes the search cheaper.
-  revolutions: 24
+  revolutions: 23
 
   # How far the final arc may be stretched or shortened past its nominal end,
   # in radians.  About one revolution of slack gives the minimum-time cost a
@@ -102,10 +113,14 @@ problem:
   # Sunlit arcs span ~5.997 rad, eclipse arcs ~0.304 -- a 19.7:1 ratio -- so
   # equal node counts would over-resolve the eclipse by an order of magnitude.
   # The eclipse arcs are also the easy ones: illumination is zero there, so the
-  # motion is Keplerian and carries no control. A mesh study over 12/3 .. 20/3
-  # put the accumulated defect at 0.090, 0.057 and -0.025 km for 605, 1563 and
-  # 2743 s, so refining past 12/3 buys ~0.1 km for 4.5x the runtime against a
-  # 3 km budget.
+  # motion is Keplerian and carries no control.
+  #
+  # A mesh study at 23 revolutions over 12/3, 16/3 and 20/3 gave accumulated
+  # defects of -0.004, -0.108 and -0.048 km in 622, 702 and 695 s.  Runtime is
+  # flat in the mesh and the defect does not improve monotonically, so there is
+  # nothing to buy by refining: 12/3 is the cheapest mesh that validates.  20/3
+  # does not -- it lands 10 m short of the perigee requirement, which is how
+  # little margin this transfer has.
   sunlit_nodes: 12
   eclipse_nodes: 3
 

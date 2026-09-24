@@ -18,7 +18,7 @@ is a separate trajopt segment, tied to its neighbours by state, control and
 longitude continuity.
 
 The sail is sized at `A/m = 10 m^2/kg`, ten times the paper's, so the transfer
-takes ~24 revolutions instead of ~90 and the example runs in minutes. Everything
+takes ~23 revolutions instead of ~90 and the example runs in minutes. Everything
 else follows the paper.
 
 ## Running it
@@ -35,7 +35,7 @@ one per revolution. Change the sail, the terminal requirement or anything else
 and it still lands on the minimum-time solution; a poor guess only costs extra
 solves, never the right answer.
 
-`problem.revolutions: 24` is already the answer for the shipped sail, so set
+`problem.revolutions: 23` is already the answer for the shipped sail, so set
 `problem.revolution_search.enabled: false` to solve once at the guess — that is
 what produced the numbers below, and it is much quicker while iterating on
 something else. A solve at this size takes a few minutes; the search multiplies
@@ -47,23 +47,26 @@ the mesh differs between them.
 | | multiple shooting | pseudospectral |
 | --- | --- | --- |
 | config | `config.yaml` | `config-ps.yaml` |
-| nodes per sunlit / eclipse arc | 10 / 4 | 18 / 6 |
-| revolutions | 24 | 24 |
-| phases | 49 | 49 |
-| elapsed time | **23.637 days** | **23.656 days** |
-| revolutions flown | 23.598 | 23.598 |
-| true final perigee radius | r_GEO + 249.92 km | r_GEO + 250.31 km |
-| true final eccentricity | 0.002997 (cap 0.003) | 0.002817 |
-| accumulated defect | 0.202 km (budget 3.0) | -0.528 km |
-| max dynamics defect | 3.17e-06 | 4.97e-07 |
-| shortest phase | 0.218 h | 0.219 h |
-| SCP iterations | 38 | 79 |
+| nodes per sunlit / eclipse arc | 12 / 3 | 24 / 4 |
+| revolutions | 23 | 23 |
+| phases | 47 | 47 |
+| total nodes | 311 | 622 |
+| elapsed time | **22.669 days** | **22.671 days** |
+| revolutions flown | 22.595 | 22.595 |
+| true final perigee radius | r_GEO + 250.01 km | r_GEO + 250.26 km |
+| true final eccentricity | 0.003000 (cap 0.003) | 0.002994 |
+| accumulated defect | -0.004 km (budget 3.0) | -0.066 km |
+| max dynamics defect | 8.56e-06 (tol 9.68e-06) | 4.35e-06 (tol 4.83e-06) |
+| shortest phase | 0.219 h | 0.219 h |
+| SCP iterations | 23 | 29 |
 | validated | **yes** | **yes** |
 
 Both requirements are active: the sail arrives at the graveyard orbit with
 essentially nothing to spare, which is what a minimum-time solution should look
-like. The two elapsed times agree to 0.08 % — two independent discretisations
-reaching the same answer is the strongest evidence available that it is right.
+like — multiple shooting lands with 7 m of perigee margin and the eccentricity
+exactly on the cap. The two elapsed times agree to 0.007 % — two independent
+discretisations reaching the same answer is the strongest evidence available
+that it is right.
 
 Every "true" quantity above comes from re-integrating the whole trajectory end to
 end from the exact initial state, using each method's own control model and never
@@ -83,24 +86,25 @@ the mesh, so the two cannot drift apart on the physics. Both reach a validated
 solution and agree on the answer to 0.08 %; the table at the top compares them.
 
 **Collocation needs more points per arc than shooting needs nodes.** This is the
-one place the two configurations genuinely differ, and it is not arbitrary. At 10
-nodes per sunlit arc the Radau residual is already excellent — 1.9e-07, far
-better than shooting manages — and yet the re-propagated trajectory drifts 7.6 km
-over the transfer and misses the perigee requirement by 3 km. The polynomial
-satisfies the dynamics *at* the collocation nodes; between them the interpolation
-error is what a propagator sees, and that error is what the terminal condition
-feels. 18 nodes per arc removes it.
+one place the two configurations genuinely differ, and it is not arbitrary. At
+12 nodes per sunlit arc — the mesh multiple shooting is happy with — the Radau
+residual is 1.1e-06, yet the re-propagated trajectory accumulates 6.4 km of
+defect and misses the perigee requirement by 3.7 km. The polynomial satisfies
+the dynamics *at* the collocation nodes; between them the interpolation error is
+what a propagator sees, and that error is what the terminal condition feels. 24
+nodes per sunlit arc removes it.
 
 The practical lesson: **do not judge a pseudospectral solution by its collocation
-residual.** A residual six times smaller than the shooting run's accompanied a
-drift fifteen times larger. Only end-to-end re-propagation separates the two.
+residual.** At 12/3 the PS residual is smaller than the shooting run's while its
+end-to-end drift is three orders of magnitude larger. Only re-propagation
+separates the two, which is why `max_propagation_error_nd` is a feasibility
+criterion and not just a diagnostic.
 
 With the mesh right, PS is the better-behaved method here. It holds the dynamics
-tighter (4.97e-07 against 3.17e-06) and improves monotonically as the problem
-grows — at 10 nodes per arc, perigee went +191 km at 12 revolutions, +232 at 16,
-+244 at 20, with the defect falling from 1.4e-03 to 9.3e-06 along the way.
-Multiple shooting does the opposite under mesh refinement; see the observations
-below.
+tighter (4.35e-06 against 8.56e-06 with each method at its own working point)
+and — unlike shooting — it converges *faster* as the mesh is refined: 50, 41 and
+55 iterations at 12/3, 16/3 and 20/4 against 29 at the shipped 24/4. The finest
+mesh is also the cheapest, so there is no accuracy-for-time trade to make.
 
 ### Figures
 
@@ -128,7 +132,7 @@ Every figure is written **twice**:
 | `phases.png` | phase timeline and per-phase durations |
 | `convergence.png` | SCP convergence history against the tolerance |
 | `summary.png` | all of the above on one sheet, for a talk |
-| `trajectory_3d.gif` | rotating 3D view (validated solutions only) |
+| `trajectory_3d.gif` | 3D view at a fixed viewpoint, with the shadow cylinder tracking the Sun as the spacecraft flies (validated solutions only) |
 
 Edit the palette and `_RC` block at the top of `visualization.py` to restyle the
 whole set at once.
@@ -142,7 +146,7 @@ whole set at once.
 | `problem.py` | expands the settings into the alternating trajopt segments |
 | `search.py` | outer loop over the revolution count (the paper's Algorithm 1) |
 | `solution.py` | extraction, independent verification, save/load |
-| `visualization.py` | summary dashboard, 3D still, rotating GIF |
+| `visualization.py` | summary dashboard, 3D still, shadow animation |
 | `main.py` | solve (or search), validate, save, draw |
 
 ## Formulation
@@ -214,7 +218,25 @@ brackets the threshold and then bisects it:
 This rests on monotonicity: more revolutions means more time under thrust, so
 feasibility, once gained, is kept. Bracketing costs `O(log(distance))` solves
 where stepping by one costs `O(distance)` — which matters, because the answer
-here is 24 and each solve at that size takes minutes.
+here is 23 and each solve at that size takes minutes.
+
+**The reachable endpoint is quantised, so the threshold is sharp.** A transfer
+can only end at the end of a sunlit arc, and the final arc's window caps the end
+at `L = 2*pi*(revolutions + 1)`. Removing one revolution therefore removes a
+whole `2*pi` of thrusting rather than a marginal amount, and the problem goes
+from comfortable to unreachable in one step: at 23 revolutions both methods
+converge in 23 and 29 iterations, at 22 they take 558 and 600 (the cap) and
+neither produces a valid solution. Expect the search to find a clean threshold,
+not a gradual degradation — and do not read a near-miss at `N-1` as something a
+little more solver effort would close.
+
+The quantisation is also what keeps the shortest count honest. At 23 the cap is
+`L = 150.796`, which falls just below the true 24th shadow entry at `L ~ 151.07`,
+so the final arc is genuinely sunlit and no eclipse is skipped. Had the cap
+landed inside a shadow, the model would have granted the sail thrust it does not
+have — the propagator takes illumination from `segment.params.illumination`, so
+a mislabelled arc propagates consistently with the wrong physics and validation
+cannot see it.
 
 Feasibility is judged on the **propagated** trajectory, not the optimiser's final
 node; see [Verification](#verification). Judged on the nodes, every count from 1
@@ -236,7 +258,7 @@ over many orbits rather than reacted to locally.
 
 | `area_to_mass_m2_kg` | revolutions | phases | transfer |
 | --- | --- | --- | --- |
-| 10 (shipped) | 24 | 49 | 23.64 days |
+| 10 (shipped) | 23 | 47 | 22.67 days |
 | 1 (paper sizing) | ~90 | ~181 | ~90 days |
 
 The paper's own sizing is reachable in principle but not in this example's
@@ -399,11 +421,15 @@ merits. `FINDINGS.md` carries the full account with measurements.
 
 ### Open
 
-6. **Multiple shooting degrades under mesh refinement.** At 12 revolutions the
-   defect grew 1.3e-01 -> 3.1e-01 -> 3.9e-01 as the mesh went 10 -> 16 -> 20
-   nodes per arc, and the trajectory got worse with it. The initial guess is
-   dynamically exact to 3e-14, so this is not a discretisation limit; it points
-   at SCP step control. Pseudospectral does the opposite and improves with size.
+6. **Multiple shooting degrades under mesh refinement — sometimes.** At 12
+   revolutions the defect grew 1.3e-01 -> 3.1e-01 -> 3.9e-01 as the mesh went
+   10 -> 16 -> 20 nodes per arc, and the trajectory got worse with it. The
+   initial guess is dynamically exact to 3e-14, so this is not a discretisation
+   limit; it points at SCP step control. The effect does **not** reproduce at
+   the shipped configuration: at 23 revolutions the defect goes 8.6e-06 ->
+   1.4e-06 -> 4.0e-06 over 12/3, 16/3, 20/3 and the runtime is flat, so whatever
+   drives it is not simply "more nodes". Recorded as open because it is
+   unexplained, not because it is always present.
 
 7. **Infeasibility surfaces as a dynamics defect, not a terminal violation.**
    The terminal cones (`scp_final_convex_inequality`) are hard while the dynamics

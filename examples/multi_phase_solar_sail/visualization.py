@@ -104,8 +104,8 @@ _NODE_STYLE = dict(s=7, facecolors="none", linewidths=0.6, zorder=5)
 def _wrap_deg(angle_rad) -> np.ndarray:
     """Angle in degrees wrapped to (-180, 180].
 
-    The steering angle winds by -2*pi per revolution, so after 24 revolutions it
-    reaches about -8500 deg.  Plotted unwrapped it flattens every other curve on
+    The steering angle winds by -2*pi per revolution, so over the 23-revolution
+    transfer it reaches about -8200 deg.  Plotted unwrapped it flattens every other curve on
     the axis; wrapped, the per-revolution structure is visible and it shares an
     axis with the cone angle sensibly.
     """

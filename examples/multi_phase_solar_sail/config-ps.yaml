@@ -8,20 +8,14 @@
 #
 #     python main.py config-ps.yaml
 #
-# Caveat
-# ------
-# trajopt's pseudospectral mesh pins each segment's initial epoch (see README,
-# "Observations about trajopt", item 3).  Combined with time continuity this
-# freezes every interior phase boundary at its initial-guess longitude.  The
-# shadow-terminator equality then stops doing what it is meant to do: with the
-# boundary longitude frozen, the only way left to satisfy r(L) |sin L| = R_Earth
-# is to bend the orbit radius at that longitude, which is backwards -- the
-# geometry should locate the boundary, not deform the trajectory.
-#
-# The formulation is kept identical anyway, because the alternative is to solve
-# a different problem here and call the comparison fair.  Expect PS to carry a
-# larger residual on that equality until the missing term is restored in
-# trajopt's mesh relation.
+# Note on the mesh relation
+# -------------------------
+# trajopt's pseudospectral mesh used to pin each segment's initial epoch, which
+# combined with time continuity froze every interior phase boundary at its
+# initial-guess longitude and left the shadow-terminator equality violated by
+# 1.3e-02.  That is fixed in the package (see README, "Changes to trajopt
+# itself", item 2); the residual is now 1.1e-08, two orders of magnitude better
+# than multiple shooting manages.
 #
 # Notes on the two methods
 # ------------------------
@@ -44,19 +38,19 @@ inherit: config.yaml
 # where it is written down.  Only the discretisation and the output directory
 # differ below.
 
-# Collocation needs more points per arc than shooting does here.  The Radau
-# residual at 10 nodes is already tiny (5e-07), but the polynomial only
-# satisfies the dynamics *at* the nodes; between them the interpolation error
-# shows up when the trajectory is re-propagated, and at 10 nodes that leaves a
-# ~7 km drift over 24 revolutions.  18 nodes per sunlit arc removes it.
 problem:
-  # Collocation needs more points per arc than shooting: the Radau residual is
-  # already tiny at 12 nodes (1.7e-06) while the re-propagated trajectory still
-  # drifts 5.2 km, because the polynomial satisfies the dynamics *at* the nodes
-  # and the interpolation error between them is what a propagator sees.  A mesh
-  # study over 12/3 .. 24/4 put the accumulated defect at 5.240, 0.592, -0.322
-  # and 0.027 km; 24/4 also converges in the fewest iterations (28) and so is
-  # not the slowest despite being the finest.
+  # Collocation needs more points per arc than shooting does.  The Radau
+  # residual at 12 nodes is already tiny (1.1e-06) while the re-propagated
+  # trajectory accumulates 6.4 km of defect, because the polynomial satisfies
+  # the dynamics *at* the nodes and the interpolation error between them is
+  # what a propagator sees.  Judge the mesh by `max_propagation_error_nd`, not
+  # by the collocation residual.
+  #
+  # A mesh study at 23 revolutions over 12/3, 16/3, 20/4 and 24/4 gave
+  # re-propagation errors of 1.29e-03, 1.71e-03, 5.29e-04 and 3.24e-04 in 196,
+  # 211, 819 and 370 s.  Only 24/4 comes under the 1e-03 limit and reaches the
+  # graveyard, and it is also the fastest of the fine meshes: it converges in 29
+  # iterations where 20/4 needs 55.  Refining PS costs nothing here.
   sunlit_nodes: 24
   eclipse_nodes: 4
 
