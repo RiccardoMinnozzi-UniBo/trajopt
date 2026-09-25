@@ -62,11 +62,47 @@ _STATE_NAMES = ("semi_latus_offset", "f", "g", "h", "k", "elapsed_time")
 _MIN_ARC_RAD = 0.05
 
 
+def shadow_drift_per_revolution(settings: AttrDict) -> float:
+    """Longitude the shadow drifts per revolution, from the Sun's own motion."""
+    rate = float(settings.sun_angular_rate_deg_per_day) * np.pi / 180.0
+    period_days = 2.0 * np.pi * np.sqrt(
+        float(settings.constants.geo_radius_km) ** 3
+        / float(settings.constants.earth_mu_km3_s2)
+    ) / float(settings.constants.day_s)
+    return rate * period_days
+
+
+def shadow_centre_longitude(settings: AttrDict, revolution: int) -> float:
+    """Longitude of the ``revolution``-th shadow centre, Sun drift included."""
+    return (2.0 * np.pi * revolution
+            + shadow_drift_per_revolution(settings) * revolution)
+
+
+def shadow_entry_longitude(settings: AttrDict, revolution: int) -> float:
+    """Longitude at which the ``revolution``-th eclipse begins."""
+    return shadow_centre_longitude(settings, revolution) - half_shadow_angle(settings)
+
+
+def final_longitude(settings: AttrDict) -> float:
+    """Longitude at which the transfer ends: the last shadow entry.
+
+    A sail transfer has no reason to continue into an eclipse -- thrust is zero
+    there, so the orbit is unchanged across it -- and every longitude past that
+    entry would need another eclipse phase to model it.  Ending the chain here
+    is what keeps the last arc a full sunlit arc instead of a stub trailing a
+    final eclipse that does no work.
+    """
+    return shadow_entry_longitude(settings, int(settings.revolutions))
+
+
 def max_flown_revolutions(settings: AttrDict) -> float:
-    """Most revolutions the trajectory can cover, given the final-arc freedom."""
-    return float(settings.revolutions) + float(
-        settings.final_longitude_freedom_rad
-    ) / (2.0 * np.pi)
+    """Most revolutions the trajectory can cover.
+
+    The final arc may end early, never late, so this is exact rather than a
+    bound: the transfer stops at the last shadow entry at the latest.
+    """
+    return (final_longitude(settings)
+            - float(settings.initial_longitude_rad)) / (2.0 * np.pi)
 
 
 def _state_box(settings: AttrDict) -> tuple[np.ndarray, np.ndarray]:
@@ -201,7 +237,13 @@ def phase_boundaries(settings: AttrDict) -> list[tuple[float, float, bool]]:
         raise ValueError(f"revolutions must be at least 1, got {n_rev}")
 
     start = float(settings.initial_longitude_rad)
-    stop = start + 2.0 * np.pi * n_rev
+    # The transfer ends at the last shadow entry, not at a whole number of
+    # revolutions past the start.  Running to start + 2*pi*n_rev instead puts
+    # that entry *inside* the span, so the chain picks up one more eclipse and
+    # then a final sunlit stub behind it -- and the minimum-time solution ends
+    # in that stub, having gained nothing from the eclipse it was forced to fly
+    # through.  See final_longitude().
+    stop = final_longitude(settings)
     half_shadow = half_shadow_angle(settings)
 
     # The shadow is centred on the anti-Sun direction, so once the Sun line
@@ -212,15 +254,9 @@ def phase_boundaries(settings: AttrDict) -> list[tuple[float, float, bool]]:
     # while the true ones drift ~1 deg per day, and after a few revolutions they
     # fall outside terminator_window_rad and the guess is wrong by more than the
     # window can absorb.
-    rate = float(settings.sun_angular_rate_deg_per_day) * np.pi / 180.0
-    period_days = 2.0 * np.pi * np.sqrt(
-        float(settings.constants.geo_radius_km) ** 3
-        / float(settings.constants.earth_mu_km3_s2)
-    ) / float(settings.constants.day_s)
-
     crossings = []
     for revolution in range(1, n_rev + 1):
-        centre = 2.0 * np.pi * revolution + rate * revolution * period_days
+        centre = shadow_centre_longitude(settings, revolution)
         crossings.extend((centre - half_shadow, centre + half_shadow))
     # Track which crossings are shadow *entries*, so each arc can be labelled by
     # construction.  Deciding it afterwards from the geometry -- "is the arc
@@ -229,8 +265,7 @@ def phase_boundaries(settings: AttrDict) -> list[tuple[float, float, bool]]:
     # that exceeds half_shadow (about nine days here) every later eclipse arc is
     # mislabelled as sunlit and the sail is given thrust it should not have.
     entries = []
-    for revolution in range(1, n_rev + 1):
-        centre = 2.0 * np.pi * revolution + rate * revolution * period_days
+    for _ in range(1, n_rev + 1):
         entries.extend((True, False))  # (centre - half_shadow, centre + half_shadow)
 
     inside = [(L, is_entry) for L, is_entry in zip(crossings, entries)
@@ -266,8 +301,17 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
         # 1 in sunlight, 0 in eclipse; multiplies the whole sail acceleration.
         "illumination": 1.0 if sunlit else 0.0,
         "final_eccentricity_max": float(settings.graveyard.eccentricity_max),
+        # The cone is asked for the requirement PLUS a margin.  Minimum time
+        # drives the *nodal* perigee exactly onto whatever it is given, and the
+        # propagated trajectory then lands short by the discretisation error, so
+        # aiming exactly at the requirement produces a solution that misses it.
+        # The margin is added here only: solution.validation_report judges the
+        # propagated orbit against the unmargined requirement, so this buys no
+        # credit -- it only stops the optimiser stopping short.
         "final_perigee_radius_km": float(
-            constants.geo_radius_km + settings.graveyard.perigee_altitude_km
+            constants.geo_radius_km
+            + settings.graveyard.perigee_altitude_km
+            + float(settings.graveyard.get("perigee_margin_km", 0.0))
         ),
     }
 
@@ -432,9 +476,13 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
             # capped at the next shadow entry, because past that point the
             # trajectory would fly through an eclipse that has no phase to model
             # it and the sail would keep thrusting in the dark.
-            next_shadow_entry = arc_stop + np.pi - half_shadow_angle(settings)
+            # arc_stop is already the shadow entry (see final_longitude), so it
+            # is the hard upper bound: past it the sail would be thrusting in a
+            # shadow that has no phase to model it.  The true entry moves later
+            # as the orbit is raised -- the half-shadow angle shrinks with 1/r --
+            # so the nominal value is the conservative side of the real one.
             end_lower = max(arc_start + _MIN_ARC_RAD, arc_stop - freedom)
-            end_upper = min(arc_stop + freedom, next_shadow_entry - _MIN_ARC_RAD)
+            end_upper = arc_stop
         else:
             # An interior arc ends on the shadow terminator.  The equality below
             # places it physically; the window is only a guard that keeps the arc

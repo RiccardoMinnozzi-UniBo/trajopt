@@ -18,61 +18,149 @@ is a separate trajopt segment, tied to its neighbours by state, control and
 longitude continuity.
 
 The sail is sized at `A/m = 10 m^2/kg`, ten times the paper's, so the transfer
-takes ~23 revolutions instead of ~90 and the example runs in minutes. Everything
+takes ~21 revolutions instead of ~90 and the example runs in minutes. Everything
 else follows the paper.
 
 ## Running it
 
 ```bash
-python main.py
+python main.py                  # RK4 multiple shooting (config.yaml)
+python main.py config-ps.yaml   # flipped Legendre-Radau collocation
 ```
 
-Edit `config.yaml`, run this, get the minimum-time solution. The revolution count
-cannot be optimised inside a single SCP solve — it sets the number of phases — so
-`main.py` searches over it, bracketing the threshold from the guess in
-`problem.revolutions` and then bisecting, which costs `O(log)` solves rather than
-one per revolution. Change the sail, the terminal requirement or anything else
-and it still lands on the minimum-time solution; a poor guess only costs extra
-solves, never the right answer.
-
-`problem.revolutions: 23` is already the answer for the shipped sail, so set
-`problem.revolution_search.enabled: false` to solve once at the guess — that is
-what produced the numbers below, and it is much quicker while iterating on
-something else. A solve at this size takes a few minutes; the search multiplies
-that by the number of attempts.
-
-Both discretisations validate against **one shared problem definition**; only
-the mesh differs between them.
+Two configurations ship, and they solve **the same 21-revolution problem** with
+the two discretisations. 21 is the minimum for this sail: both methods reach it,
+and 20 fails for both. `config-ps.yaml` inherits `config.yaml` and overrides only
+what belongs to the discretisation — the mesh, the terminal margin and the
+dynamics penalty initialisation — so the two cannot drift apart on the physics.
 
 | | multiple shooting | pseudospectral |
 | --- | --- | --- |
 | config | `config.yaml` | `config-ps.yaml` |
+| revolutions / phases | 21 / 41 | 21 / 41 |
 | nodes per sunlit / eclipse arc | 12 / 3 | 24 / 4 |
-| revolutions | 23 | 23 |
-| phases | 47 | 47 |
-| total nodes | 311 | 622 |
-| elapsed time | **22.669 days** | **22.671 days** |
-| revolutions flown | 22.595 | 22.595 |
-| true final perigee radius | r_GEO + 250.01 km | r_GEO + 250.26 km |
-| true final eccentricity | 0.003000 (cap 0.003) | 0.002994 |
-| accumulated defect | -0.004 km (budget 3.0) | -0.066 km |
-| max dynamics defect | 8.56e-06 (tol 9.68e-06) | 4.35e-06 (tol 4.83e-06) |
-| shortest phase | 0.219 h | 0.219 h |
-| SCP iterations | 23 | 29 |
+| total nodes | 272 | 544 |
+| dynamics penalty `W.init` | 100 | 1.0 |
+| terminal margin | 0.3 km | 0 |
+| elapsed time | **20.101 days** | **20.114 days** |
+| revolutions flown | 20.037 | 20.039 |
+| true final perigee radius | r_GEO + 250.34 km | r_GEO + 250.10 km |
+| true final eccentricity | 0.003000 (cap 0.003) | 0.002995 |
+| accumulated defect | -0.033 km (budget 3.0) | -0.022 km |
+| max dynamics defect | 1.59e-06 (tol 1.11e-05) | 5.00e-07 (tol 5.52e-06) |
+| shortest phase | 1.160 h | 1.160 h |
+| SCP iterations | 39 | **15** |
+| runtime | 569 s | **234 s** |
 | validated | **yes** | **yes** |
 
-Both requirements are active: the sail arrives at the graveyard orbit with
-essentially nothing to spare, which is what a minimum-time solution should look
-like — multiple shooting lands with 7 m of perigee margin and the eccentricity
-exactly on the cap. The two elapsed times agree to 0.007 % — two independent
-discretisations reaching the same answer is the strongest evidence available
-that it is right.
+The two elapsed times agree to **0.06 %** — two independent discretisations, two
+meshes and two penalty balances reaching the same transfer is the strongest
+evidence available that it is right.
 
-Every "true" quantity above comes from re-integrating the whole trajectory end to
-end from the exact initial state, using each method's own control model and never
-resetting to the optimiser's nodes. See [Verification](#verification): the node
+The eccentricity cap is active in both: the sail arrives with nothing to spare
+on it, which is what a minimum-time solution should look like. The perigee has
+100–340 m of room because the nodal cone is asked for a margin; see
+[The settings that differ between the methods](#the-settings-that-differ-between-the-methods).
+
+Every "true" quantity above comes from re-integrating the whole trajectory end
+to end from the exact initial state, using each method's own control model and
+never resetting to the optimiser's nodes. They were checked again against an
+adaptive DOP853 integration at `rtol = atol = 1e-12`, independent of trajopt's
+fixed-step RK4, which agrees to 12 m. See [Verification](#verification): the node
 values on their own cannot be trusted, because minimum time drives them exactly
 onto the constraint.
+
+### The settings that differ between the methods
+
+Three settings had to be chosen per discretisation before both methods would
+solve this. `FINDINGS.md` section 8 has the measurements and the list of things
+that turned out not to matter.
+
+| setting | shooting | collocation | why |
+| --- | --- | --- | --- |
+| mesh | 12 / 3 | 24 / 4 | collocation needs more points per arc; its residual is small at 12 nodes while the re-propagated trajectory drifts 5.3 km |
+| `graveyard.perigee_margin_km` | 0.3 | 0 | minimum time parks the *nodal* perigee on the constraint, so the propagated orbit lands short by the discretisation error. Shooting needs 300 m of margin; collocation does not, and is pushed past its defect tolerance by it |
+| `penalty.dynamics.W.init` | 100 | 1.0 | **worth two revolutions.** trajopt's `min_time` cost sums over nodes, so its magnitude grows with the node count and the same penalty weight sits very differently against it. At 100 collocation cannot solve 22 revolutions at all; at 1.0 it solves 21 in 15 iterations. Shooting wants the opposite |
+
+The last one is the trap: with the wrong value collocation looks like it has a
+structural limit two revolutions above shooting, and no amount of mesh
+refinement, `hp_segments`, solver swapping or warm-starting moves it.
+
+#### How the configuration was arrived at
+
+Briefly, because most of it was not obvious and the dead ends are as
+informative as the fixes. `FINDINGS.md` section 8 has the measurements.
+
+1. **Let the steering wind.** `steering_limits` capped `theta` at ±2π and the
+   guess held it constant, so the sail could not track a primer that turns once
+   per revolution. Worth about +50 km of perigee.
+2. **End the phase chain at the last shadow entry**, not at a whole number of
+   revolutions. The old form forced a final eclipse plus a 0.056 rad sunlit stub
+   that did no work, and cost two revolutions on its own.
+3. **Give the nodal terminal cone a margin** — for shooting only. Minimum time
+   parks the nodal perigee on the constraint, so the propagated orbit lands
+   short; without the margin the solution missed by 75 m and passed only on
+   validator slack.
+4. **Set the dynamics penalty per discretisation.** Worth two more revolutions
+   for collocation, and the hardest to find, because the symptom is
+   indistinguishable from the method being unable to solve the problem.
+
+Dead ends worth knowing: mesh refinement and `hp_segments` (four meshes, 576–788
+nodes, agree within 0.35 km); the conic solver (SCS matches Clarabel to 10 m,
+QOCO is worse, ECOS and PIQP do not run at this size); the trust-region weights
+(inert — the term vanishes at convergence, so both directions reproduce the
+baseline bit for bit); free node placement via `equal_dt: 0` (53 m, though it
+does cut shooting's iteration count); and warm-starting collocation from a
+verified shooting solution, which makes it *worse*.
+
+### The revolution count
+
+`main.py` searches over the revolution count, bracketing the threshold from the
+guess in `problem.revolutions` and then bisecting, which costs `O(log)` solves
+rather than one per revolution. Set `problem.revolution_search.enabled: false`
+to solve once at the guess — that is what produced the numbers above, and it is
+much quicker while iterating on something else.
+
+Both methods find the same floor, once each is configured for its own
+discretisation:
+
+| revolutions | phases | multiple shooting | pseudospectral |
+| --- | --- | --- | --- |
+| 22 | 43 | +250.32 km ✓ | +250.03 km ✓ |
+| **21** | **41** | **+250.34 km ✓** | **+250.10 km ✓** |
+| 20 | 39 | +245.00 km ✗ | +246.42 km ✗ |
+
+Both fail sharply one revolution below the floor rather than degrading — the
+propagated orbit stalls 3.6–5 km short and the solve either converges to a
+trajectory that misses the requirement or runs to the iteration cap. Expect the
+search to find a clean threshold, and do not read a near-miss at `N-1` as
+something a little more solver effort would close.
+
+Be aware that a *mis-set* solver parameter looks exactly like a structural
+floor. With the shooting dynamics penalty, collocation appears to bottom out at
+23 revolutions and resists every discretisation lever; the cause is
+`penalty.dynamics.W.init`, not the method. See
+[The settings that differ](#the-settings-that-differ-between-the-methods).
+
+### The terminal margin
+
+`graveyard.perigee_margin_km` is added to the **nodal** terminal cone and to
+nothing else — `solution.validation_report` judges the independently propagated
+orbit against `perigee_altitude_km`, so the margin earns no credit in the
+verdict.
+
+It is there because minimum time drives the nodal perigee exactly onto whatever
+the cone asks for, and the propagated trajectory then lands short by the
+discretisation error. Aiming exactly at the requirement produces a solution that
+misses it: multiple shooting came out 75 m low and passed only on the
+validator's 100 m slack, and at a 20/3 mesh it failed outright. With 300 m of
+margin it lands comfortably above the requirement.
+
+The gap belongs to the discretisation, so the margin does too, and it sits with
+the node counts. Collocation at 24 nodes per arc does not need it, and
+`config-ps.yaml` sets it to zero: asking that mesh for the extra 300 m moves the
+propagated perigee up by 300 m but pushes the per-interval defect from 4.82e-06
+to 6.91e-06, past its tolerance, so the solve stops validating.
 
 ### Discretisation: multiple shooting or pseudospectral
 
@@ -81,9 +169,11 @@ python main.py                  # RK4 multiple shooting (config.yaml)
 python main.py config-ps.yaml   # flipped Legendre-Radau collocation
 ```
 
-`config-ps.yaml` inherits `config.yaml` and overrides only the discretisation and
-the mesh, so the two cannot drift apart on the physics. Both reach a validated
-solution and agree on the answer to 0.08 %; the table at the top compares them.
+`config-ps.yaml` inherits `config.yaml` and overrides only what belongs to the
+discretisation — the mesh, the terminal margin and the dynamics penalty — so the
+two cannot drift apart on the physics. Both reach a validated solution at 21
+revolutions and agree on the elapsed time to 0.06 %; the table at the top
+compares them.
 
 **Collocation needs more points per arc than shooting needs nodes.** This is the
 one place the two configurations genuinely differ, and it is not arbitrary. At
@@ -100,11 +190,20 @@ end-to-end drift is three orders of magnitude larger. Only re-propagation
 separates the two, which is why `max_propagation_error_nd` is a feasibility
 criterion and not just a diagnostic.
 
-With the mesh right, PS is the better-behaved method here. It holds the dynamics
-tighter (4.35e-06 against 8.56e-06 with each method at its own working point)
-and — unlike shooting — it converges *faster* as the mesh is refined: 50, 41 and
-55 iterations at 12/3, 16/3 and 20/4 against 29 at the shipped 24/4. The finest
-mesh is also the cheapest, so there is no accuracy-for-time trade to make.
+With the mesh right, collocation is much the cheaper method **at the revolution
+count both can solve**: 315 s against 802 s, in 24 iterations against 47,
+despite twice the nodes — roughly five times faster per node per iteration. It
+also converges faster as its mesh is refined, so within its working range there
+is no accuracy-for-time trade to make.
+
+What it cannot do is go further. Shooting validates down to 21 revolutions;
+collocation does not converge below 23, and four separate levers — mesh
+resolution, `hp_segments`, seeding from a verified shooting solution, and
+continuation from its own converged answer — fail to close the gap, the last two
+making it worse. That is the single most important caveat in this example, and
+`FINDINGS.md` section 8 sets out the evidence. **Do not read the 23-revolution
+agreement as meaning the two are interchangeable here:** they agree on the answer
+they can both reach, and disagree on how far the problem can be pushed.
 
 ### Figures
 
@@ -113,11 +212,16 @@ one- or two-column figure. Each is also callable on its own from
 `visualization.py` and takes `annotated=True/False`, so you can restyle or drop
 any of them.
 
+Each configuration writes to its own directory — `results/` and `results-ps/` —
+so the two sets sit side by side and can be compared without re-running
+anything.
+
 Every figure is written **twice**:
 
 - `results/` — annotated. Each figure carries the settings it came from (A/m,
   revolution count, elapsed time, validation status), so a figure found on disk
-  months later is self-describing.
+  months later is self-describing, and the three directories are told apart by
+  their annotations rather than by filename.
 - `results/paper/` — unannotated, same axes. The annotation sits outside the
   axes, so with a tight bounding box it changes the saved figure's extent; the
   clean version drops into a LaTeX float without disturbing the layout around
@@ -141,7 +245,8 @@ whole set at once.
 
 | file | role |
 | --- | --- |
-| `config.yaml` | every physical, structural and solver setting worth editing |
+| `config.yaml` | every physical, structural and solver setting worth editing; multiple shooting at 21 revolutions |
+| `config-ps.yaml` | the same problem, pseudospectral; overrides only the mesh, terminal margin and dynamics penalty |
 | `solar_sail.py` | dynamics, sail steering law, shadow geometry, terminal cones |
 | `problem.py` | expands the settings into the alternating trajopt segments |
 | `search.py` | outer loop over the revolution count (the paper's Algorithm 1) |
@@ -218,25 +323,33 @@ brackets the threshold and then bisects it:
 This rests on monotonicity: more revolutions means more time under thrust, so
 feasibility, once gained, is kept. Bracketing costs `O(log(distance))` solves
 where stepping by one costs `O(distance)` — which matters, because the answer
-here is 23 and each solve at that size takes minutes.
+here is 21 for both methods and each solve at that size takes minutes.
 
-**The reachable endpoint is quantised, so the threshold is sharp.** A transfer
-can only end at the end of a sunlit arc, and the final arc's window caps the end
-at `L = 2*pi*(revolutions + 1)`. Removing one revolution therefore removes a
-whole `2*pi` of thrusting rather than a marginal amount, and the problem goes
-from comfortable to unreachable in one step: at 23 revolutions both methods
-converge in 23 and 29 iterations, at 22 they take 558 and 600 (the cap) and
-neither produces a valid solution. Expect the search to find a clean threshold,
-not a gradual degradation — and do not read a near-miss at `N-1` as something a
-little more solver effort would close.
+Monotonicity holds in the revolution count, but not in the solver settings: a
+penalty weight that suits one discretisation can make the other stall two
+revolutions early, and the search cannot tell that apart from infeasibility. If
+a method's floor looks surprisingly high, suspect the configuration before the
+method.
 
-The quantisation is also what keeps the shortest count honest. At 23 the cap is
-`L = 150.796`, which falls just below the true 24th shadow entry at `L ~ 151.07`,
-so the final arc is genuinely sunlit and no eclipse is skipped. Had the cap
-landed inside a shadow, the model would have granted the sail thrust it does not
-have — the propagator takes illumination from `segment.params.illumination`, so
-a mislabelled arc propagates consistently with the wrong physics and validation
-cannot see it.
+**The reachable endpoint is quantised, so the threshold is sharp.** The phase
+chain ends at the last shadow entry, so removing one revolution removes a whole
+`2*pi` of thrusting rather than a marginal amount. The problem goes from
+comfortable to unreachable in one step: shooting converges in 39 iterations at
+21 revolutions and runs to the 601-iteration cap at 20, and collocation
+converges in 24 at 23 and hits the cap at 22. Expect a clean threshold, not a
+gradual degradation — and do not read a near-miss at `N-1` as something a little
+more solver effort would close. Four different levers were tried on the
+collocation case and none of them closed it (`FINDINGS.md` section 8).
+
+Ending the chain at the shadow entry is also what keeps the count honest. The
+alternative — running to `start + 2*pi*n_rev` — puts the next shadow entry
+*inside* the span, so the chain picks up one more eclipse and a sunlit stub
+behind it, and the minimum-time solution ends in that stub having gained nothing
+from the eclipse it was forced to fly through. Worse, had the final arc been
+allowed past a shadow entry, the model would have granted the sail thrust it
+does not have: the propagator takes illumination from
+`segment.params.illumination`, so a mislabelled arc propagates consistently with
+the wrong physics and validation cannot see it.
 
 Feasibility is judged on the **propagated** trajectory, not the optimiser's final
 node; see [Verification](#verification). Judged on the nodes, every count from 1
@@ -258,7 +371,7 @@ over many orbits rather than reacted to locally.
 
 | `area_to_mass_m2_kg` | revolutions | phases | transfer |
 | --- | --- | --- | --- |
-| 10 (shipped) | 23 | 47 | 22.67 days |
+| 10 (shipped) | 21 | 41 | 20.10 days |
 | 1 (paper sizing) | ~90 | ~181 | ~90 days |
 
 The paper's own sizing is reachable in principle but not in this example's
@@ -421,47 +534,66 @@ merits. `FINDINGS.md` carries the full account with measurements.
 
 ### Open
 
-6. **Multiple shooting degrades under mesh refinement — sometimes.** At 12
+6. **The dynamics penalty initialisation has to be tuned per discretisation.**
+   `penalty.dynamics.W.init` has to differ by two orders of magnitude between
+   shooting (100) and collocation (1.0) on this problem, because trajopt's
+   `min_time` cost sums the longitude over every node of the final segment: its
+   magnitude grows with the node count, so the same weight sits very differently
+   against it for two meshes of different size. Getting it wrong is expensive
+   and silent — with the shooting value, collocation cannot solve a revolution
+   count it otherwise solves in 15 iterations, and the failure looks exactly
+   like a structural limit of the method. Normalising the cost by node count, or
+   the weight by it, would remove the trap.
+
+7. **Multiple shooting degrades under mesh refinement — sometimes.** At 12
    revolutions the defect grew 1.3e-01 -> 3.1e-01 -> 3.9e-01 as the mesh went
    10 -> 16 -> 20 nodes per arc, and the trajectory got worse with it. The
    initial guess is dynamically exact to 3e-14, so this is not a discretisation
    limit; it points at SCP step control. The effect does **not** reproduce at
-   the shipped configuration: at 23 revolutions the defect goes 8.6e-06 ->
+   the shipped configuration: the defect goes 2.75e-06 ->
    1.4e-06 -> 4.0e-06 over 12/3, 16/3, 20/3 and the runtime is flat, so whatever
    drives it is not simply "more nodes". Recorded as open because it is
    unexplained, not because it is always present.
 
-7. **Infeasibility surfaces as a dynamics defect, not a terminal violation.**
+8. **Infeasibility surfaces as a dynamics defect, not a terminal violation.**
    The terminal cones (`scp_final_convex_inequality`) are hard while the dynamics
    are buffered, so when the target is out of reach the only slack in the problem
    is the dynamics and every infeasible run looks like a numerical failure.
    Buffering the cones was tried and is worse — minimum time then simply violates
    them — so the asymmetry is right, but it makes diagnosis hard.
 
-8. **Scalability.** CVXPY constraint formatting attempted a 76 GiB allocation
-   around 35 revolutions, and per-solve cost grows superlinearly (13 s at 5
-   revolutions, 259 s at 30). This is what keeps the paper's `A/m = 1` sizing out
-   of reach here.
+9. **Scalability, and the memory it costs.** CVXPY constraint formatting
+   attempted a 76 GiB allocation around 35 revolutions, and per-solve cost grows
+   superlinearly (13 s at 5 revolutions, 259 s at 30). This is what keeps the
+   paper's `A/m = 1` sizing out of reach here.
 
-9. **`final_time` bounds assume the segment starts at zero.** In
+   It also sets a practical floor on running the shipped example. The shooting
+   build peaks near **45 GB of RAM** before the first SCP iteration, then settles
+   to ~31 GB for the solve. Construction memory scales with the phase count —
+   11 phases peak at ~10 GB, 41 at ~45 GB — and it is single-threaded, so the
+   peak lasts several minutes with no output at all, which is easy to mistake
+   for a hang. On a machine with less headroom the run dies in canonicalisation
+   rather than in the solver. Collocation is far lighter despite twice the nodes.
+
+10. **`final_time` bounds assume the segment starts at zero.** In
    `constraint_types.final_time`, `dt_min = lower / (N - 1)` and
    `dt_max = upper / (N - 1)` bound the *absolute* final time, then get applied as
    per-interval spacing bounds. Right for a first segment starting at t = 0,
    wrong for any later segment in a chain. This example works around it with a
    `final_nonconvex_inequality` on the longitude.
 
-10. **The PS branch ignores `zoh_dilation`.** The `ms` branch applies
+11. **The PS branch ignores `zoh_dilation`.** The `ms` branch applies
     `s_k == s_{k+1}` only when the flag is set; the `ps` branch always does. It
     is in fact required for consistency with the affine PS mesh, so the flag is
     simply inert there.
 
-11. **`hp_segments` is a method-wide flag but a per-segment constraint.** It must
+12. **`hp_segments` is a method-wide flag but a per-segment constraint.** It must
     divide `num_nodes - 1` for *every* segment, so a multi-phase problem with
     different node counts per phase type can only use common divisors. The
     shipped `autoscvx-ps.yaml` defaults to `hp_segments: 10`, which fails for most
     node counts; `1` is the only value that never constrains the mesh.
 
-12. **`compute_legendre(..., use_spartan=False)` returns NaN at `x = ±1`.** The
+13. **`compute_legendre(..., use_spartan=False)` returns NaN at `x = ±1`.** The
     scipy branch evaluates `N (x P_n - P_{n-1}) / (x^2 - 1)`, which is 0/0 at the
     endpoints — and `±1` are always in the node set. Latent only because
     `USE_SPARTAN = True` is the default.
@@ -491,9 +623,9 @@ rate to `0.0` to recover a fixed Sun.
 ## Changes to trajopt itself
 
 Everything above runs against a modified `src/trajopt`. These are the package
-changes this example forced, all of them bugs rather than accommodations —
-`git diff src/` shows 93 insertions across 7 files. `FINDINGS.md` carries the
-measurements.
+changes this example forced, all of them bugs rather than accommodations — 93
+insertions across 7 files, landed in commit `f0ce5e9` (`git show f0ce5e9 -- src/`).
+`FINDINGS.md` carries the measurements.
 
 Each fix is applied to **both** `dev/sqp` and `dev/scvx`, which carry the
 affected code verbatim.

@@ -46,19 +46,51 @@ problem:
   # what a propagator sees.  Judge the mesh by `max_propagation_error_nd`, not
   # by the collocation residual.
   #
-  # A mesh study at 23 revolutions over 12/3, 16/3, 20/4 and 24/4 gave
-  # re-propagation errors of 1.29e-03, 1.71e-03, 5.29e-04 and 3.24e-04 in 196,
-  # 211, 819 and 370 s.  Only 24/4 comes under the 1e-03 limit and reaches the
-  # graveyard, and it is also the fastest of the fine meshes: it converges in 29
-  # iterations where 20/4 needs 55.  Refining PS costs nothing here.
+  # A mesh study over 12/3, 16/3, 20/4 and 24/4 gave re-propagation errors of
+  # 2.61e-03, 7.98e-04, 7.66e-04 and 4.61e-04.  Only 24/4 comes under the 1e-03
+  # limit and reaches the graveyard, and it is also the fastest of the fine
+  # meshes.  Refining collocation costs nothing here.
   sunlit_nodes: 24
   eclipse_nodes: 4
+
+  # No terminal margin is needed here, and adding one is counter-productive.
+  #
+  # The margin in config.yaml compensates the gap between the nodal terminal
+  # state and the independently propagated one, and that gap belongs to the
+  # discretisation: shooting at 12 nodes per arc lands 75 m low without it,
+  # collocation at 24 nodes does not.  Asking this mesh for the extra 300 m buys
+  # nothing (+250.41 km instead of +250.11) and costs accuracy -- the
+  # per-interval defect goes 4.82e-06 -> 6.91e-06 and crosses the 5.04e-06
+  # tolerance, so the solve stops validating.  It is listed with the node counts
+  # because it is the same kind of setting.
+  graveyard:
+    perigee_margin_km: 0.0
 
 method:
   flags:
     discretize: ps
     equal_dt: 0
     hp_segments: 1
+
+  penalty:
+    # THE setting that decides whether collocation can solve this problem.
+    #
+    # config.yaml starts the dynamics penalty at 100 because trajopt's min_time
+    # cost sums the longitude over every node of the final segment, so its
+    # magnitude grows with the node count and can outweigh the dynamics penalty.
+    # That reasoning is right for shooting and wrong here, because this mesh has
+    # roughly twice as many nodes: the same weight sits very differently against
+    # the objective, and starting that high over-constrains the iteration.
+    #
+    # The cost is two revolutions.  At 100 collocation cannot solve 22
+    # revolutions at all -- it runs to the iteration cap 4 km short, and no mesh,
+    # hp_segments value, solver or initial guess rescues it.  At the trajopt
+    # default of 1.0 it solves 21 revolutions in 15 iterations, the fastest
+    # solve in the example.  Shooting wants the opposite: at 1.0 it fails at 20
+    # revolutions where at 100 it converges.
+    dynamics:
+      W:
+        init: 1.0
 
 output:
   directory: results-ps

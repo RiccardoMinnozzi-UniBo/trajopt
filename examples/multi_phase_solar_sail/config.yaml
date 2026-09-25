@@ -32,23 +32,24 @@ problem:
   # and brackets the minimum from here, so a wrong value costs extra solves but
   # never the right answer.
   #
-  # 23 is the verified minimum for the shipped sail, and both discretisations
-  # reach it: MS in 23 iterations and PS in 29, with the graveyard met on the
-  # independently propagated trajectory.  22 fails for both, and fails on
-  # opposite criteria -- MS converges but the propagated orbit misses the
-  # eccentricity cap, PS reaches the graveyard but never converges, hitting the
-  # iteration cap with a defect two orders of magnitude above budget.  The
-  # iteration count goes 23/29 at 23 revolutions to 558/600 at 22, so the
-  # feasible set ends abruptly here rather than degrading.
+  # 21 is the verified minimum for the shipped sail, and both discretisations
+  # reach it: shooting in 39 iterations, collocation in 15, with the graveyard
+  # met on the independently propagated trajectory in both cases.  20 fails for
+  # both -- shooting converges but the propagated orbit lands 5 km short with
+  # the eccentricity over cap, collocation runs to the iteration cap 3.6 km
+  # short -- so the feasible set ends abruptly here rather than degrading.
   #
-  # Why not fewer: a transfer ends only at the end of a sunlit arc, and the
-  # final arc's window caps the end at L = 2*pi*(revolutions + 1).  Dropping one
-  # revolution therefore removes a whole 2*pi of thrusting, not a marginal
-  # amount.  At 23 the cap is L = 150.796, just below the true 24th shadow
-  # entry at L ~ 151.07, so the final arc is genuinely sunlit.
+  # Getting both methods here took two settings that differ between them: the
+  # terminal margin below, and penalty.dynamics.W.init (see method.penalty).
+  # FINDINGS.md section 8 documents what was tried.
+  #
+  # Why not fewer: the phase chain ends at the last shadow entry, so dropping a
+  # revolution removes a whole 2*pi of thrusting rather than a marginal amount.
+  # The sail raises perigee by about 12 km per revolution near the end of the
+  # transfer, and 20 revolutions falls 3.6-5 km short of the requirement.
   #
   # Setting it close to the expected answer just makes the search cheaper.
-  revolutions: 23
+  revolutions: 21
 
   # How far the final arc may be stretched or shortened past its nominal end,
   # in radians.  About one revolution of slack gives the minimum-time cost a
@@ -182,6 +183,20 @@ problem:
   graveyard:
     perigee_altitude_km: 250.0   # perigee radius must reach r_GEO + this
     eccentricity_max:    0.003
+
+    # Extra perigee the *nodal* terminal cone is asked for, in km.  It is not
+    # part of the requirement: solution.validation_report judges the
+    # independently propagated orbit against perigee_altitude_km above, so this
+    # buys no credit in the verdict.
+    #
+    # It is needed because minimum time drives the nodal perigee exactly onto
+    # whatever the cone asks for, and the propagated trajectory then lands short
+    # by the discretisation error.  Aiming exactly at the requirement therefore
+    # produces a solution that misses it: at 23 revolutions multiple shooting
+    # came out 75 m low and passed only on the validator's 100 m slack, and at
+    # the 20/3 mesh it failed outright.  With this margin the same case lands
+    # 515 m above the requirement on the propagated orbit.
+    perigee_margin_km: 0.3
 
   # Outer loop over the revolution count (the paper's Algorithm 1).  main.py
   # runs this on every invocation, starting from the guess above and bracketing
