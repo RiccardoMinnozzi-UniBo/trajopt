@@ -77,6 +77,9 @@ def load_yaml(path_str: str) -> AttrDict:
     except FileNotFoundError:
         raise FileNotFoundError(f"config not found: '{path_str}'") from None
 
+    if not isinstance(raw, dict):
+        raise ValueError(f"config '{path_str}' must contain a YAML mapping")
+
     config = expand_dot_keys(recursive_attrdict(raw))
     return _resolve_fcn_paths(config, base_dir)
 

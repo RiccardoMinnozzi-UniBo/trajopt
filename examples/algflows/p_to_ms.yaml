@@ -1,0 +1,9 @@
+# Transfer the p-stage polynomial onto a multiple-shooting mesh.
+flow:
+  stages:
+    - name: p_method
+      config: stages/p_method.yaml
+    - name: shooting
+      config: stages/ms.yaml
+      initial_guess:
+        from: p_method

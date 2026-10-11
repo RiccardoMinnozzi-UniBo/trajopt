@@ -1,0 +1,9 @@
+# Reconstruct the aerodynamic-load accumulator from the nodal entry trajectory.
+flow:
+  stages:
+    - name: nodal
+      config: stages/ms.yaml
+    - name: ctcs
+      config: stages/ctcs.yaml
+      initial_guess:
+        from: nodal

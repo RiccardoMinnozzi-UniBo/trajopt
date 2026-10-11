@@ -1,0 +1,42 @@
+"""Results of sequential trajectory optimization stages."""
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from trajopt.methods.common.initial_guess import Guess
+
+
+@dataclass
+class StageResult:
+    name: str
+    config_path: Path
+    config: dict
+    status: str = 'failed'
+    reason: str = ''
+    solver_status: str | None = None
+    iterations: int = 0
+    trajectory: dict[str, Guess] = field(default_factory=dict)
+    layouts: dict = field(default_factory=dict)
+    timings: dict[str, float] = field(default_factory=dict)
+    seed_from: str | None = None
+    transferred_phases: tuple[str, ...] = ()
+
+    @property
+    def converged(self) -> bool:
+        return self.status == 'converged'
+
+
+@dataclass
+class FlowResult:
+    stages: dict[str, StageResult] = field(default_factory=dict)
+    completed: bool = False
+    failed_stage: str | None = None
+    elapsed_s: float = 0.
+
+    @property
+    def final(self) -> StageResult | None:
+        return next(reversed(self.stages.values())) if self.stages else None
+
+    @property
+    def converged(self) -> bool:
+        """The final stage converged and all preceding stages permitted continuation."""
+        return self.completed and self.final is not None and self.final.converged
