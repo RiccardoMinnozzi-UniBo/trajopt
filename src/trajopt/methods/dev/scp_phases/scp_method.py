@@ -50,14 +50,7 @@ class SCPMethod(GuessLifecycle):
             scp_phase.current_iter_data.solve_time = solve_time
             scp_phase.read_solution()
 
-        trust_region_params = next(iter(self.scp_trajectory.scp_phases.values())).hyperparams.trust_region
-        if getattr(trust_region_params, 'line_search', True):
-            alpha = trust_region.line_search(
-                self.scp_trajectory.scp_phases.values(),
-                alpha_min=float(getattr(trust_region_params, 'alpha_min_ls', 1e-7)),
-            )
-        else:
-            alpha = 1.0
+        alpha = trust_region.select_step_size(self.scp_trajectory.scp_phases.values())
 
         for scp_phase in self.scp_trajectory.scp_phases.values():
             scp_phase.cp_subproblem_status = self.cp_subproblem.status

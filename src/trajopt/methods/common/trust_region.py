@@ -112,6 +112,17 @@ def relax_scp_trust_region(subproblems) -> None:
             subproblem.tr_scale = max(subproblem.tr_scale * 0.7, 1.0)
 
 
+def select_step_size(subproblems) -> float:
+    """Choose a shared step size using the first phase's trust-region settings."""
+    subproblems = list(subproblems)
+    params = subproblems[0].hyperparams.trust_region
+    if not getattr(params, 'line_search', True):
+        return 1.0
+    return line_search(
+        subproblems, alpha_min=float(getattr(params, 'alpha_min_ls', 1e-7)),
+    )
+
+
 def line_search(subproblems, alpha_min=1e-7, c1=1e-4, beta=0.5, max_iter=20):
     subproblems = list(subproblems)
 

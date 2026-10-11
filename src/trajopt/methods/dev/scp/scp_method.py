@@ -50,13 +50,7 @@ class SCPMethod(GuessLifecycle):
         self.subproblem.current_iter_data.solve_time = solve_time
         self.subproblem.read_solution()
 
-        if getattr(self.subproblem.hyperparams.trust_region, 'line_search', True):
-            alpha = trust_region.line_search(
-                [self.subproblem],
-                alpha_min=float(getattr(self.subproblem.hyperparams.trust_region, 'alpha_min_ls', 1e-7)),
-            )
-        else:
-            alpha = 1.0
+        alpha = trust_region.select_step_size([self.subproblem])
 
         self.subproblem.cp_subproblem_status = self.cp_subproblem.status
         self.subproblem.apply_step(alpha)
