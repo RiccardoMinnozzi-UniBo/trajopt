@@ -1,0 +1,6 @@
+inherit: ms.yaml
+
+trajectory:
+  num_nodes: 9
+method:
+  inherit: trajopt/methods/common/configs/discretize/pseudospectral_p.yaml
