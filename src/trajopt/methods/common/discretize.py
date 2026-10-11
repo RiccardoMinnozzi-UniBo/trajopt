@@ -498,7 +498,9 @@ def create_time_constraints_ps(subproblem):
 
     for k in range(1, N - 1):
         subproblem.cp_constraints.append(
-            subproblem.dt[k, 0] == subproblem.cp_params.ps_t_offset[k] + tau[k] * subproblem.dt[N - 1, 0]
+            subproblem.dt[k, 0] == (subproblem.cp_params.ps_t_offset[k]
+                                    + subproblem.dt[0, 0]
+                                    + tau[k] * (subproblem.dt[N - 1, 0] - subproblem.dt[0, 0]))
         )
 
     for k in range(N - 1):

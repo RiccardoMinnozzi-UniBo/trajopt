@@ -1,4 +1,3 @@
-# Transfer the p-stage polynomial onto a multiple-shooting mesh.
 flow:
   stages:
     - name: p_method
