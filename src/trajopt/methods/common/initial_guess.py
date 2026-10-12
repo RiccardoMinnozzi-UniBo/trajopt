@@ -456,12 +456,13 @@ def set_initial_guess(phase, method_phase):
         method_phase.initial_guess.z, method_phase.initial_guess.nu, phase, method_phase)
 
 
-def export_guess(method_phase):
-    """Snapshot the iterate with its native mesh interpolation."""
+def export_guess(method_phase, *, include_aux=True):
+    """Snapshot native interpolation; omit aux for destination reconstruction."""
     values = dimensional_samples(method_phase.phase, method_phase.current_iter_data.z_opt,
                                  method_phase.current_iter_data.nu_opt)
     mesh = method_phase.mesh
-    return Guess.from_samples(t=values.t, x=values.x, u=values.u, s=values.s, aux=values.aux,
+    return Guess.from_samples(t=values.t, x=values.x, u=values.u, s=values.s,
+                              aux=values.aux if include_aux else None,
                               tau=mesh.tau, interpolation='polynomial' if mesh.discretize == 'ps' else 'linear',
                               segments=mesh.segments)
 

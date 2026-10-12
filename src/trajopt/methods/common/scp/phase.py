@@ -19,5 +19,4 @@ class SCPPhase(Subproblem):
                    for t in ("time_continuity", "full_continuity"))
 
     def _anchor_start_time(self) -> bool:
-        # the ps mesh is built around a fixed node 0
-        return self.hyperparams.discretize.mode == "ps" or not self.inherits_start_epoch()
+        return not self.inherits_start_epoch()

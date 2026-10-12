@@ -63,9 +63,9 @@ class TrajectoryAnalyzer():
         self.method.solve()
         self._solved = True
 
-    def export_guess(self):
-        """Export per-phase guesses without analysis."""
-        return self.method.export_guess()
+    def export_guess(self, *, include_aux=True):
+        """Export phase guesses; omit aux for destination reconstruction."""
+        return self.method.export_guess(include_aux=include_aux)
 
     def reset(self, *, initial_guess=None):
         """Restart SCP from a Guess or phase mapping, resetting penalties and history.

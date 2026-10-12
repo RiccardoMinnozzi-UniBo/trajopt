@@ -10,9 +10,10 @@ class GuessLifecycle:
         return (trajectory.scp_phases if hasattr(trajectory, 'scp_phases')
                 else trajectory.scp_subproblems)
 
-    def export_guess(self):
-        """Snapshot each phase by name."""
-        return {name: export_guess(p) for name, p in self._guess_subproblems().items()}
+    def export_guess(self, *, include_aux=True):
+        """Snapshot phases; omit aux for destination reconstruction."""
+        return {name: export_guess(p, include_aux=include_aux)
+                for name, p in self._guess_subproblems().items()}
 
     def reset(self, *, initial_guess=None):
         """Validate all guesses, then reset iteration state while retaining compiled objects."""

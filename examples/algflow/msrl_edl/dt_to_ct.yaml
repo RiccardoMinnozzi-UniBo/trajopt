@@ -1,0 +1,8 @@
+flow:
+  stages:
+    - name: nodal
+      config: stages/ms.yaml
+    - name: ctcs
+      config: stages/ctcs.yaml
+      initial_guess:
+        from: nodal
