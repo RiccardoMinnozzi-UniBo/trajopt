@@ -3,4 +3,4 @@ formulation_class: dev.phases
 
 inherit:
   - autoscvx2.yaml
-  - trajopt/methods/common/configs/discretize/second_order_hp.yaml
+  - trajopt/methods/common/configs/discretize/second_order_p.yaml

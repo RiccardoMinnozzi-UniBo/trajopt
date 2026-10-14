@@ -377,16 +377,9 @@ def compile_merit_penalty_scp_dynamics(self, scp_phase):
     if scp_phase.hyperparams.discretize.mode == "ps":
         D_jnp = jnp.asarray(self.ps_D)
         dyn_batched = self.dyn_fcn_batched
-        H = self.ps_hp
-        p = self.ps_p
         def violation(z, nu, params):
             f_col = dyn_batched(z[1:], nu[1:], params)
-            defects = []
-            for h in range(H):
-                col_start = h * p
-                z_h = jax.lax.dynamic_slice(z, (col_start, 0), (p + 1, z.shape[1]))
-                defects.append(2.0 * D_jnp @ z_h)
-            return jnp.concatenate(defects, axis=0) - f_col
+            return 2.0 * D_jnp @ z - f_col
         compile_merit_penalty_from_violation(self, violation)
         return
     propagate = self.propagate

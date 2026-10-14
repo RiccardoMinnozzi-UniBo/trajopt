@@ -3,4 +3,4 @@ formulation_class: dev.phases
 
 inherit:
   - autoscvx-term.yaml
-  - trajopt/methods/common/configs/discretize/pseudospectral_hp.yaml
+  - trajopt/methods/common/configs/discretize/pseudospectral_p.yaml
