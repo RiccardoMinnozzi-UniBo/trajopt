@@ -11,7 +11,7 @@ import scipy as sp
 # =============================================================================
 
 def make_trajectory_solver(dynamics, params, n_steps, discretize="ms"):
-    """JIT-compiled RK4 solver for the full trajectory; discretize picks FOH ("ms") or Lagrange ("ps") control interpolation."""
+    """JIT-compiled RK4 solver for the full trajectory; controls use FOH for both "ms" and "ps" (Lagrange for "ps" is commented out)."""
     use_ps = (discretize == "ps")
 
     if use_ps:
@@ -21,17 +21,23 @@ def make_trajectory_solver(dynamics, params, n_steps, discretize="ms"):
             taus = jnp.linspace(tau0, tau_f, n_steps + 1)
             N_nodes = tau_ref.shape[0]
 
-            diffs = tau_ref[:, None] - tau_ref[None, :]
-            diffs = diffs + jnp.eye(N_nodes)
-            bary_weights = 1.0 / jnp.prod(diffs, axis=1)
+            # Lagrange control interpolation, replaced by FOH below
+            # diffs = tau_ref[:, None] - tau_ref[None, :]
+            # diffs = diffs + jnp.eye(N_nodes)
+            # bary_weights = 1.0 / jnp.prod(diffs, axis=1)
+            #
+            # def nu_interp(z, tau):
+            #     d = tau - tau_ref
+            #     exact = jnp.argmin(jnp.abs(d))
+            #     is_exact = jnp.abs(d[exact]) < 1e-14
+            #     w_over_d = bary_weights / (d + 1e-300)
+            #     interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
+            #     return jnp.where(is_exact, nu_ref[exact], interp_val)
 
             def nu_interp(z, tau):
-                d = tau - tau_ref
-                exact = jnp.argmin(jnp.abs(d))
-                is_exact = jnp.abs(d[exact]) < 1e-14
-                w_over_d = bary_weights / (d + 1e-300)
-                interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
-                return jnp.where(is_exact, nu_ref[exact], interp_val)
+                k = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
+                a = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
+                return (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
 
             def step(z, tau):
                 nu = nu_interp(z, tau)
@@ -508,6 +514,7 @@ def final_time_interval_constraints_ps(constraint, subproblem):
 def dynamics_compile_ps(constraint, subproblem):
     mesh = subproblem.mesh
     constraint.ps_D = mesh.differentiation
+    constraint.ps_Dinv = np.linalg.inv(2.0 * mesh.differentiation[:, 1:])
     constraint.ps_etau = 2 * mesh.tau - 1
     constraint.ps_tau_norm = mesh.tau
     subproblem.ps_tau_norm = mesh.tau
@@ -583,7 +590,7 @@ def dynamics_update_current_iter_data_ps(constraint, subproblem):
     lhs = 2.0 * D_jnp @ z_jnp
 
     f_vals = constraint.dyn_fcn_batched(z_jnp[1:], nu_jnp[1:], subproblem.params)
-    subproblem.current_iter_data.defect = np.asarray(lhs - f_vals)
+    subproblem.current_iter_data.defect = constraint.ps_Dinv @ np.asarray(lhs - f_vals)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ class Mesh:
     tau: np.ndarray
     discretize: str
     differentiation: np.ndarray | None = None
+    weights: np.ndarray | None = None  # quadrature weights on [0, 1] at the collocation nodes tau[1:]
 
 
 def make_mesh(num_nodes, options, fcns=None):
@@ -22,7 +23,7 @@ def make_mesh(num_nodes, options, fcns=None):
     if kind != 'ps':
         raise ValueError(f'Unknown discretization {kind!r}')
     operator = fcns.differential_operator if fcns is not None else discretize.flipped_radau_differential_operator
-    _, nodes, _, D = operator(num_nodes-1)
+    _, nodes, w, D = operator(num_nodes-1)
     tau = (nodes + 1) / 2
     tau[0], tau[-1] = 0., 1.
-    return Mesh(tau, kind, D)
+    return Mesh(tau, kind, D, w / 2)

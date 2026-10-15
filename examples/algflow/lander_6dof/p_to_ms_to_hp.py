@@ -1,4 +1,3 @@
-# %%
 """6-DoF lander: pseudospectral p-method to multiple shooting to hp-method."""
 from pathlib import Path
 
@@ -22,7 +21,6 @@ if __name__ == "__main__":
     result = main()
     print("converged.")
 
-    # %%
     sol = result.stages["p_method"].trajectory["main"]
     nt = len(sol.native_tau)
     b = np.ones(nt)
