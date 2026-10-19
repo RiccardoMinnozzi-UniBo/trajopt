@@ -10,47 +10,42 @@ import scipy as sp
 # SHARED
 # =============================================================================
 
-def make_trajectory_solver(dynamics, params, n_steps, discretize="ms"):
-    """JIT-compiled RK4 solver for the full trajectory; controls use FOH for both "ms" and "ps" (Lagrange for "ps" is commented out)."""
+def make_trajectory_solver(dynamics, params, n_steps, discretize="ms",
+                           segments=1, control_interpolation="lagrange", dilation_idx=None):
+    """JIT-compiled RK4 solver for the full trajectory; "ms" uses FOH controls,
+    "ps" uses interpolate_control_ps (lagrange or FOH) on each hp segment."""
     use_ps = (discretize == "ps")
 
     if use_ps:
+        # number of time steps for each hp segment
+        n_seg_steps = max(n_steps // segments, 1)
+
         @jax.jit
         def solve(z0, tau0, tau_f, tau_ref, nu_ref):
-            dt   = (tau_f - tau0) / n_steps
-            taus = jnp.linspace(tau0, tau_f, n_steps + 1)
-            N_nodes = tau_ref.shape[0]
+            nu_interp = interpolate_control_ps(tau_ref, nu_ref, segments, dilation_idx, control_interpolation)
+            knots = jnp.linspace(tau0, tau_f, segments + 1)
 
-            # Lagrange control interpolation, replaced by FOH below
-            # diffs = tau_ref[:, None] - tau_ref[None, :]
-            # diffs = diffs + jnp.eye(N_nodes)
-            # bary_weights = 1.0 / jnp.prod(diffs, axis=1)
-            #
-            # def nu_interp(z, tau):
-            #     d = tau - tau_ref
-            #     exact = jnp.argmin(jnp.abs(d))
-            #     is_exact = jnp.abs(d[exact]) < 1e-14
-            #     w_over_d = bary_weights / (d + 1e-300)
-            #     interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
-            #     return jnp.where(is_exact, nu_ref[exact], interp_val)
+            def segment(z_h, h):
+                dt   = (knots[h + 1] - knots[h]) / n_seg_steps
+                taus = knots[h] + dt * jnp.arange(n_seg_steps)
 
-            def nu_interp(z, tau):
-                k = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
-                a = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
-                return (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
+                # h is passed explicitly, so the step ending on a knot still uses this segment's dilation
+                def step(z, tau):
+                    nu = nu_interp(tau, h)
+                    k1 = dynamics(z,               nu,                        params)
+                    k2 = dynamics(z + (dt/2) * k1, nu_interp(tau + dt / 2, h), params)
+                    k3 = dynamics(z + (dt/2) * k2, nu_interp(tau + dt / 2, h), params)
+                    k4 = dynamics(z + dt * k3,     nu_interp(tau + dt, h),     params)
+                    z_next = z + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+                    return z_next, (z, nu)
 
-            def step(z, tau):
-                nu = nu_interp(z, tau)
-                k1 = dynamics(z,               nu,                                        params)
-                k2 = dynamics(z + (dt/2) * k1, nu_interp(z + (dt/2) * k1, tau + dt / 2), params)
-                k3 = dynamics(z + (dt/2) * k2, nu_interp(z + (dt/2) * k2, tau + dt / 2), params)
-                k4 = dynamics(z + dt * k3,     nu_interp(z + dt * k3,     tau + dt),      params)
-                z_next = z + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
-                return z_next, (z, nu)
+                z_next_h, (z_traj, nu_traj) = jax.lax.scan(step, z_h, taus)
+                return z_next_h, (taus, z_traj, nu_traj)
 
-            z_f, (z_traj, nu_traj) = jax.lax.scan(step, z0, taus[:-1])
-            z_traj  = jnp.concatenate([z_traj,  z_f[None]])
-            nu_traj = jnp.concatenate([nu_traj, nu_interp(z_f, taus[-1])[None]])
+            z_f, (taus, z_traj, nu_traj) = jax.lax.scan(segment, z0, jnp.arange(segments))
+            taus    = jnp.concatenate([taus.reshape(-1), tau_f[None]])
+            z_traj  = jnp.concatenate([z_traj.reshape(-1, z0.shape[0]), z_f[None]])
+            nu_traj = jnp.concatenate([nu_traj.reshape(-1, nu_ref.shape[1]), nu_interp(tau_f, segments - 1)[None]])
             return taus, z_traj, nu_traj
 
     else:
@@ -83,10 +78,12 @@ def make_trajectory_solver(dynamics, params, n_steps, discretize="ms"):
 
 
 def propagate_trajectory(z_nodes, tau_nodes, nu_nodes, dynamics, params,
-                         discretize="ms", n_steps=500, _solver=None):
+                         discretize="ms", n_steps=500, _solver=None,
+                         segments=1, control_interpolation="lagrange", dilation_idx=None):
     """Propagate the full trajectory from its initial condition using interpolated controls."""
     if _solver is None:
-        _solver = make_trajectory_solver(dynamics, params, n_steps, discretize=discretize)
+        _solver = make_trajectory_solver(dynamics, params, n_steps, discretize=discretize, segments=segments,
+                                         control_interpolation=control_interpolation, dilation_idx=dilation_idx)
 
     taus, z_traj, nu_traj = _solver(
         jnp.asarray(z_nodes[0]),
@@ -123,17 +120,24 @@ def _make_rk4_solver(nu_fn, dynamics, params, n_steps):
     return solve
 
 
-def make_node_propagation_solver(dynamics, params, n_steps):
+def make_node_propagation_solver(dynamics, params, n_steps, discretize="ms",
+                                 segments=1, control_interpolation="lagrange", dilation_idx=None):
+    use_ps = (discretize == "ps")
+
     @jax.jit
-    def solve(z0, tau0, tau_f, tau_ref, nu_ref):
+    def solve(z0, tau0, tau_f, tau_ref, nu_ref, h=0):
         dt   = (tau_f - tau0) / n_steps
         taus = jnp.linspace(tau0, tau_f, n_steps + 1)
         N_nodes = tau_ref.shape[0]
 
-        def nu_interp(z, tau):
-            k = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
-            a = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
-            return (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
+        if use_ps:
+            nu_interp_ps = interpolate_control_ps(tau_ref, nu_ref, segments, dilation_idx, control_interpolation)
+            nu_interp = lambda z, tau: nu_interp_ps(tau, h)
+        else:
+            def nu_interp(z, tau):
+                k = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
+                a = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
+                return (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
 
         def step(z, tau):
             nu = nu_interp(z, tau)
@@ -163,25 +167,31 @@ def propagate_rk4(z0, tau0, tau_f, nu_fn, dynamics, params, n_steps=1000):
 
 
 def propagate_from_nodes(z_nodes, tau_nodes, nu_nodes, dynamics, params,
-                         n_dense_per_seg=50, _solver=None):
-    """Propagate node-by-node (restarts from each node, shows defects)."""
+                         n_dense_per_seg=50, _solver=None, discretize="ms",
+                         segments=1, control_interpolation="lagrange", dilation_idx=None):
+    """Propagate node-by-node (restarts from each node, shows defects); "ps" restarts from each hp segment knot."""
     N   = z_nodes.shape[0]
     n_z = z_nodes.shape[1]
 
     if _solver is None:
-        _solver = make_node_propagation_solver(dynamics, params, n_dense_per_seg)
+        _solver = make_node_propagation_solver(dynamics, params, n_dense_per_seg, discretize=discretize, segments=segments,
+                                               control_interpolation=control_interpolation, dilation_idx=dilation_idx)
 
     tau_ref = jnp.asarray(tau_nodes)
     nu_ref  = jnp.asarray(nu_nodes)
 
+    # restart stride: every node for ms, every segment for ps (collocation nodes are not shooting nodes)
+    stride = (N - 1) // segments if discretize == "ps" else 1
+
     phases = []
-    for k in range(N - 1):
+    for k in range(0, N - 1, stride):
         taus_k, z_k, nu_k = _solver(
             jnp.asarray(z_nodes[k]),
             jnp.asarray(float(tau_nodes[k])),
-            jnp.asarray(float(tau_nodes[k + 1])),
+            jnp.asarray(float(tau_nodes[k + stride])),
             tau_ref,
             nu_ref,
+            k // stride,
         )
         phases.append((np.asarray(taus_k), np.asarray(z_k), np.asarray(nu_k)))
 
@@ -195,7 +205,7 @@ def propagate_from_nodes(z_nodes, tau_nodes, nu_nodes, dynamics, params,
         flat_tau.append(tau_k)
         flat_z.append(z_k)
         flat_nu.append(nu_k)
-        if k < N - 2:
+        if k < len(phases) - 1:
             flat_tau.append(nan_tau)
             flat_z.append(nan_z)
             flat_nu.append(nan_nu)
@@ -641,27 +651,38 @@ def dynamics_update_cvxpy_parameters_second_order_ps(constraint, subproblem):
 # control interpolation
 # ---------------------------------------------------------------------------
 
-# def interpolate_control_lagrange(tau_nodes, nu_nodes):
-#     """Returns a JAX nu(z, tau) interpolator, built once from barycentric Lagrange weights."""
-#     tau_ref = jnp.asarray(tau_nodes)
-#     nu_ref  = jnp.asarray(nu_nodes)
-#     N_nodes = tau_ref.shape[0]
+def interpolate_control_ps(tau_nodes, nu_nodes, segments, dilation_idx, kind="lagrange"):
+    """Returns a nu(tau, h) interpolator on hp segment h: controls are Lagrange on the segment's
+    collocation nodes ("lagrange") or linear between nodes ("foh"), while dilation is constant per segment."""
+    tau_ref = jnp.asarray(tau_nodes)
+    nu_ref  = jnp.asarray(nu_nodes)
+    N_nodes = tau_ref.shape[0]
+    p       = (N_nodes - 1) // segments
 
-#     diffs = tau_ref[:, None] - tau_ref[None, :]
-#     diffs = diffs + jnp.eye(N_nodes)
-#     bary_weights = 1.0 / jnp.prod(diffs, axis=1)
+    # equal order segments, so they share the barycentric weights
+    tau_loc = tau_ref[1:p + 1]
+    diffs   = tau_loc[:, None] - tau_loc[None, :] + jnp.eye(p)
+    bary_weights = 1.0 / jnp.prod(diffs, axis=1)
 
-#     def nu_interp(z, tau):
-#         d = tau - tau_ref
-#         exact = jnp.argmin(jnp.abs(d))
-#         is_exact = jnp.abs(d[exact]) < 1e-14
+    def nu_interp(tau, h):
+        if kind == "foh":
+            k  = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
+            a  = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
+            nu = (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
+        else:
+            # controls only the segment's collocation nodes, start node belongs to the previous segment
+            nodes = jax.lax.dynamic_slice(tau_ref, (h * p + 1,), (p,))
+            vals  = jax.lax.dynamic_slice(nu_ref, (h * p + 1, 0), (p, nu_ref.shape[1]))
+            d     = tau - nodes
+            exact = jnp.argmin(jnp.abs(d))
+            w_over_d = bary_weights / (d + 1e-300)
+            interp_val = jnp.sum(w_over_d[:, None] * vals, axis=0) / jnp.sum(w_over_d)
+            nu = jnp.where(jnp.abs(d[exact]) < 1e-14, vals[exact], interp_val)
 
-#         w_over_d = bary_weights / (d + 1e-300)
-#         interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
+        # the transcription holds the dilation constant on each segment's collocation nodes
+        return nu.at[dilation_idx].set(nu_ref[h * p + 1, dilation_idx])
 
-#         return jnp.where(is_exact, nu_ref[exact], interp_val)
-
-#     return nu_interp
+    return nu_interp
 
 
 USE_SPARTAN = True
