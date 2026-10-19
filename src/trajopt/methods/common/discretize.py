@@ -465,46 +465,54 @@ def make_lagrangian_rk4_propagator(dyn_fcn, N_grid, nsub):
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# time representation (subproblem-level: cp_params.tau/ps_t_offset, dt/ds constraints)
+# time representation (subproblem-level: dt/ds constraints; time is affine per segment through the dynamics)
 # ---------------------------------------------------------------------------
 
 def create_time_params_ps(subproblem):
-    N = subproblem.index_map.N.all
-    subproblem.cp_params.tau = cp.Parameter((N,), name="tau")
-    subproblem.cp_params.tau.value = subproblem.ps_tau_norm
-    subproblem.cp_params.ps_t_offset = cp.Parameter((N,), name="ps_t_offset", value=np.zeros(N))
+    pass
 
 
 def update_time_params_ps(subproblem):
-    z_opt = subproblem.current_iter_data.z_opt
-    t_ref_vals = z_opt[:, subproblem.index_map.indices.z.time].flatten()
-    t0, tf = t_ref_vals[0], t_ref_vals[-1]
-    subproblem.cp_params.ps_t_offset.value = t0 + subproblem.ps_tau_norm * (tf - t0) - t_ref_vals
+    pass
 
 
 def create_time_constraints_ps(subproblem):
     N = subproblem.index_map.N.all
-    tau = subproblem.cp_params.tau
-
-    for k in range(1, N - 1):
-        subproblem.cp_constraints.append(
-            subproblem.dt[k, 0] == (subproblem.cp_params.ps_t_offset[k]
-                                    + subproblem.dt[0, 0]
-                                    + tau[k] * (subproblem.dt[N - 1, 0] - subproblem.dt[0, 0]))
-        )
+    H = subproblem.mesh.segments
+    p = (N - 1) // H
 
     for k in range(N - 1):
-        subproblem.cp_constraints.append(0.0 <= subproblem.s_ref[k, 0] + subproblem.ds[k, 0])
         s_k  = subproblem.s_ref[k, 0] + subproblem.ds[k, 0]
         s_kp = subproblem.s_ref[k + 1, 0] + subproblem.ds[k + 1, 0]
-        subproblem.cp_constraints.append(s_k == s_kp)
+
+        subproblem.cp_constraints.append(0.0 <= s_k)
+
+        # apply consecutive dilations equality when: p method (H=1), inside the h segments, zoh_dilation = 1
+        if k == 0 or k % p or (hasattr(subproblem.hyperparams.flags, "zoh_dilation") and bool(subproblem.hyperparams.flags.zoh_dilation)):
+            subproblem.cp_constraints.append(s_k == s_kp)
+
+    if hasattr(subproblem.hyperparams.discretize, "equal_dt") and bool(subproblem.hyperparams.discretize.equal_dt):
+        # equal H segments widths
+        width_0 = (subproblem.t_ref[p, 0] + subproblem.dt[p, 0]) - (subproblem.t_ref[0, 0] + subproblem.dt[0, 0])
+        for h in range(1, H):
+            t_h  = subproblem.t_ref[h * p, 0] + subproblem.dt[h * p, 0]
+            t_hp = subproblem.t_ref[(h + 1) * p, 0] + subproblem.dt[(h + 1) * p, 0]
+            subproblem.cp_constraints.append(t_hp - t_h == width_0)
 
     subproblem.cp_constraints.append(subproblem.t_ref[N - 1, 0] + subproblem.dt[N - 1, 0] >= 0.0)
     subproblem.cp_constraints.append(0.0 <= subproblem.s_ref[N - 1, 0] + subproblem.ds[N - 1, 0])
 
 
 def final_time_interval_constraints_ps(constraint, subproblem):
-    pass  # pseudospectral node spacing comes from the collocation scheme instead
+    # segment widths treated like the ms node intervals
+    N = subproblem.index_map.N.all
+    H = subproblem.mesh.segments
+    p = (N - 1) // H
+    for h in range(H):
+        t_h  = subproblem.t_ref[h * p, 0] + subproblem.dt[h * p, 0]
+        t_hp = subproblem.t_ref[(h + 1) * p, 0] + subproblem.dt[(h + 1) * p, 0]
+        subproblem.cp_constraints.append(t_hp - t_h <= subproblem.cp_params.T_max / H)
+        subproblem.cp_constraints.append(t_hp - t_h >= subproblem.cp_params.T_min / H)
 
 
 # ---------------------------------------------------------------------------
@@ -514,10 +522,9 @@ def final_time_interval_constraints_ps(constraint, subproblem):
 def dynamics_compile_ps(constraint, subproblem):
     mesh = subproblem.mesh
     constraint.ps_D = mesh.differentiation
-    constraint.ps_Dinv = np.linalg.inv(2.0 * mesh.differentiation[:, 1:])
-    constraint.ps_etau = 2 * mesh.tau - 1
-    constraint.ps_tau_norm = mesh.tau
-    subproblem.ps_tau_norm = mesh.tau
+    # map the ps defects from derivatives to states (now comparable with ms)
+    p = (len(mesh.tau) - 1) // mesh.segments
+    constraint.ps_Dinv = sp.linalg.block_diag(*[np.linalg.inv(2.0 * mesh.differentiation[:p, 1:p + 1])] * mesh.segments)
     constraint.dyn_fcn_batched = jax.jit(jax.vmap(constraint.dyn_fcn, in_axes=(0, 0, None)))
 
     # only ps's per-node constraint linearization needs the dynamics Jacobians
@@ -712,23 +719,23 @@ def compute_legendre(N: int, x: np.ndarray, use_spartan: bool = USE_SPARTAN) -> 
 # ---------------------------------------------------------------------
 # Flipped Legendre-Radau polynomial
 # ---------------------------------------------------------------------
-def flipped_radau_polynomial(N: int, tau: np.ndarray, use_spartan: bool = USE_SPARTAN) -> np.ndarray:
-    """Evaluate the flipped Legendre-Radau polynomial R_n(tau) = P_n(tau) - P_{n-1}(tau)."""
-    tau     = np.asarray(tau, dtype=float)
+# def flipped_radau_polynomial(N: int, tau: np.ndarray, use_spartan: bool = USE_SPARTAN) -> np.ndarray:
+#     """Evaluate the flipped Legendre-Radau polynomial R_n(tau) = P_n(tau) - P_{n-1}(tau)."""
+#     tau     = np.asarray(tau, dtype=float)
 
-    Ln, _   = compute_legendre(N, tau, use_spartan=use_spartan)
-    Lnm1, _ = compute_legendre(N - 1, tau, use_spartan=use_spartan)
+#     Ln, _   = compute_legendre(N, tau, use_spartan=use_spartan)
+#     Lnm1, _ = compute_legendre(N - 1, tau, use_spartan=use_spartan)
 
-    return Ln - Lnm1
+#     return Ln - Lnm1
 
 
-def flipped_radau_polynomial_derivative(N: int, tau: np.ndarray) -> np.ndarray:
-    """Derivative of the flipped Legendre-Radau polynomial."""
-    tau         = np.asarray(tau, dtype=float)
-    _, dLn      = compute_legendre(N, tau, use_spartan=USE_SPARTAN)
-    _, dLnm1    = compute_legendre(N - 1, tau, use_spartan=USE_SPARTAN)
+# def flipped_radau_polynomial_derivative(N: int, tau: np.ndarray) -> np.ndarray:
+#     """Derivative of the flipped Legendre-Radau polynomial."""
+#     tau         = np.asarray(tau, dtype=float)
+#     _, dLn      = compute_legendre(N, tau, use_spartan=USE_SPARTAN)
+#     _, dLnm1    = compute_legendre(N - 1, tau, use_spartan=USE_SPARTAN)
 
-    return dLn - dLnm1
+#     return dLn - dLnm1
 
 
 # ---------------------------------------------------------------------
@@ -851,42 +858,38 @@ def differentiation_matrix(etau: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
 
     return D, D_full, D2
 
-def differentiation_matrix_compare(full_nodes: np.ndarray) -> np.ndarray:
-    """Compute the fLGR differentiation matrix via an alternative barycentric form."""
-    x = np.asarray(full_nodes, dtype=float)
-    m = len(x)
-
-    # Pairwise differences: dX[i,j] = x_i - x_j
-    dX = x[:, None] - x[None, :]
-
-    # Barycentric weights:
-    #   lambda_i = 1 / prod_{j != i} (x_i - x_j)
-    dX_no_diag = dX + np.eye(m)
-    lam = 1.0 / np.prod(dX_no_diag, axis=1)
-
-    # Off-diagonal entries:
-    #   D_ij = lambda_j / (lambda_i * (x_i - x_j)),  i != j
-    D_full = np.outer(1.0 / lam, lam) / dX_no_diag
-
-    # Fix diagonal entries so each row sums to zero
-    np.fill_diagonal(D_full, 0.0)
-    np.fill_diagonal(D_full, -np.sum(D_full, axis=1))
-
-    # fLGR: remove the first row, keep all columns
-    D = D_full[1:, :]
-
-    return D
-
 
 def flipped_radau_differential_operator(N: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Returns (tau, etau, w, D): fLGR nodes, full node set, quadrature weights, and differential operator."""
     tau, etau, w    = flipped_radau_nodes_and_weights(N)
     D, _, _         = differentiation_matrix(etau)
 
-    #D_compare       = differentiation_matrix_compare(etau)
-    #D = D_compare
-
     return tau, etau, w, D
+
+
+# ---------------------------------------------------------------------
+# hp composite differential operator
+# ---------------------------------------------------------------------
+
+def flipped_radau_hp_operator(N_col: int, H: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """hp-composite fLGR on H segments of equal order; output D is the global (N_col, N_col+1) staircase of local blocks."""
+    if N_col % H != 0:
+        raise ValueError(f"N_col={N_col} must be divisible by H={H}")
+    if H == 1:
+        return flipped_radau_differential_operator(N_col)
+
+    p = N_col // H
+    _, etau_local, w_local, D_local = flipped_radau_differential_operator(p)
+
+    # segment h spans [-1 + 2h/H, -1 + 2(h+1)/H], consecutive segments share their final-to-initial node
+    etau = np.concatenate([[-1.0]] + [-1.0 + (2.0 * h + etau_local[1:] + 1.0) / H for h in range(H)])
+    w    = np.tile(w_local, H) / H
+
+    D = np.zeros((N_col, N_col + 1))
+    for h in range(H):
+        D[h * p:(h + 1) * p, h * p:(h + 1) * p + 1] = H * D_local
+
+    return etau[1:], etau, w, D
 
 
 # ---------------------------------------------------------------------

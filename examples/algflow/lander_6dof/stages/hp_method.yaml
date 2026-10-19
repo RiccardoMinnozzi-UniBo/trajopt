@@ -1,9 +1,10 @@
 inherit: ms.yaml
 
 trajectory:
-  num_nodes: 9
-hyperparams:
-  discretize:
-    hp_segments: 10
+  num_nodes: 41
 method:
-  inherit: trajopt/methods/common/configs/discretize/pseudospectral_p.yaml
+  inherit: trajopt/methods/common/configs/discretize/pseudospectral_hp.yaml
+  hyperparams:
+    flags:
+      # one dilation per segment, so the segment widths are free
+      zoh_dilation: 0
