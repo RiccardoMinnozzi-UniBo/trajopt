@@ -15,7 +15,7 @@ class Mesh:
     segments: int = 1  # hp segments of equal order; knots at node indices h * (N-1) / segments
 
 
-def make_mesh(num_nodes, options, fcns=None):
+def make_mesh(num_nodes, options, fcns=None, segments=1):
     if num_nodes < 2:
         raise ValueError('A trajectory mesh needs at least two nodes')
     kind = getattr(options, 'mode', 'ms')
@@ -23,9 +23,9 @@ def make_mesh(num_nodes, options, fcns=None):
         return Mesh(np.linspace(0, 1, num_nodes), kind)
     if kind != 'ps':
         raise ValueError(f'Unknown discretization {kind!r}')
-    segments = getattr(options, 'hp_segments', 1)
     if int(segments) != segments or segments < 1 or (num_nodes-1) % segments:
-        raise ValueError('hp_segments must be a positive integer, with num_nodes - 1 being an integer multiple of hp_segments')
+        raise ValueError(f"hp_segments={segments} must be a positive integer "
+                         f"dividing num_nodes - 1 = {num_nodes - 1}")
     segments = int(segments)
     operator = fcns.differential_operator if fcns is not None else discretize.flipped_radau_hp_operator
     _, nodes, w, D = operator(num_nodes-1, segments)
