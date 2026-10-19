@@ -7,5 +7,4 @@ method:
   inherit: trajopt/methods/common/configs/discretize/pseudospectral_p.yaml
   hyperparams:
     flags:
-      # one dilation per segment, so the segment widths are free
-      zoh_dilation: 0
+      zoh_dilation: 1

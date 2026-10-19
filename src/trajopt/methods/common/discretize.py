@@ -641,27 +641,27 @@ def dynamics_update_cvxpy_parameters_second_order_ps(constraint, subproblem):
 # control interpolation
 # ---------------------------------------------------------------------------
 
-def interpolate_control_lagrange(tau_nodes, nu_nodes):
-    """Returns a JAX nu(z, tau) interpolator, built once from barycentric Lagrange weights."""
-    tau_ref = jnp.asarray(tau_nodes)
-    nu_ref  = jnp.asarray(nu_nodes)
-    N_nodes = tau_ref.shape[0]
+# def interpolate_control_lagrange(tau_nodes, nu_nodes):
+#     """Returns a JAX nu(z, tau) interpolator, built once from barycentric Lagrange weights."""
+#     tau_ref = jnp.asarray(tau_nodes)
+#     nu_ref  = jnp.asarray(nu_nodes)
+#     N_nodes = tau_ref.shape[0]
 
-    diffs = tau_ref[:, None] - tau_ref[None, :]
-    diffs = diffs + jnp.eye(N_nodes)
-    bary_weights = 1.0 / jnp.prod(diffs, axis=1)
+#     diffs = tau_ref[:, None] - tau_ref[None, :]
+#     diffs = diffs + jnp.eye(N_nodes)
+#     bary_weights = 1.0 / jnp.prod(diffs, axis=1)
 
-    def nu_interp(z, tau):
-        d = tau - tau_ref
-        exact = jnp.argmin(jnp.abs(d))
-        is_exact = jnp.abs(d[exact]) < 1e-14
+#     def nu_interp(z, tau):
+#         d = tau - tau_ref
+#         exact = jnp.argmin(jnp.abs(d))
+#         is_exact = jnp.abs(d[exact]) < 1e-14
 
-        w_over_d = bary_weights / (d + 1e-300)
-        interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
+#         w_over_d = bary_weights / (d + 1e-300)
+#         interp_val = jnp.sum(w_over_d[:, None] * nu_ref, axis=0) / jnp.sum(w_over_d)
 
-        return jnp.where(is_exact, nu_ref[exact], interp_val)
+#         return jnp.where(is_exact, nu_ref[exact], interp_val)
 
-    return nu_interp
+#     return nu_interp
 
 
 USE_SPARTAN = True
