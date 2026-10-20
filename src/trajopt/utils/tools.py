@@ -147,7 +147,7 @@ def resolve_function_from_string(fcn_string: str, fcns: "AttrDict | None" = None
                 )
 
             if has_stl:
-                from trajopt.constraints.stl import parse_stl_expression
+                from trajopt.formulations.common.stl import parse_stl_expression
                 return parse_stl_expression(fcn_string, fcns)
 
             ns = {}
@@ -171,9 +171,17 @@ def resolve_function_from_string(fcn_string: str, fcns: "AttrDict | None" = None
 
     parent_dir = file_path.parent
     pkg_init = parent_dir / "__init__.py"
+    package_root = Path(__file__).resolve().parents[1]
 
     try:
-        if pkg_init.exists():
+        if file_path.is_relative_to(package_root):
+            # Reuse package modules so configured providers and direct imports
+            # share class identities (for example, initial_guess.Guess).
+            parts = file_path.relative_to(package_root).with_suffix("").parts
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            module = importlib.import_module(".".join(("trajopt", *parts)))
+        elif pkg_init.exists():
             pkg_name = parent_dir.name
             mod_name = f"{pkg_name}.{file_path.stem}"
 

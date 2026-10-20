@@ -4,55 +4,62 @@ import jax
 import numpy as np
 
 from trajopt.analysis.results import Iterate, MissionResult, RunResult
-from trajopt.methods.common import integrators, pseudospectral
 from trajopt.utils import tools
 from trajopt.utils.tools import AttrDict
 
 jax.config.update("jax_enable_x64", True)
 
 def perform_analysis(traj) -> RunResult:
-    """Propagate every segment's iterates and merge them into one mission trajectory."""
-    scp_segments = traj.method.scp_trajectory.scp_segments
-    segments = [analyze_segment(subprob, traj.config) for subprob in scp_segments.values()]
+    """Propagate every phase's iterates and merge them into one mission trajectory."""
+    scp_trajectory = traj.method.scp_trajectory
+    scp_phases = getattr(scp_trajectory, "scp_phases", None)
+    if scp_phases is None:
+        scp_phases = scp_trajectory.scp_subproblems
+    phases = [analyze_phase(subprob, traj.config) for subprob in scp_phases.values()]
 
-    if len(segments) == 1:
-        iter_mappings = segments[0]
+    if len(phases) == 1:
+        iter_mappings = phases[0]
     else:
-        n_iters       = min(len(seg) for seg in segments)
+        n_iters       = min(len(seg) for seg in phases)
         iter_mappings = []
         for i in range(n_iters):
-            per_segment = [seg[i] for seg in segments]
-            pad_missing_outputs(per_segment)
-            iter_mappings.append(concat(per_segment))
+            per_phase = [seg[i] for seg in phases]
+            pad_missing_outputs(per_phase)
+            iter_mappings.append(concat(per_phase))
 
-    solver_iters = {name: subprob.iter_data_list for name, subprob in scp_segments.items()}
+    solver_iters = {name: subprob.iter_data_list for name, subprob in scp_phases.items()}
 
     iter_data_list = [Iterate.from_mapping(m) for m in iter_mappings]
     return RunResult(iter_data_list=iter_data_list, solver_iters=solver_iters)
 
 
-def analyze_segment(subprob, config):
-    """Propagate each iterate and evaluate the segment's outputs."""
-    segment    = subprob.segment
-    params     = segment.params
-    nondim     = segment.nondim
-    idx        = segment.index_map.indices
+def analyze_phase(subprob, config):
+    """Propagate each iterate and evaluate the phase's outputs."""
+    phase    = subprob.phase
+    params     = phase.params
+    nondim     = phase.nondim
+    idx        = phase.index_map.indices
     time_scale = nondim.time_scale
 
     iters    = subprob.iter_data_list if config.analysis.compute_iters else [subprob.iter_data_list[-1]]
-    dynamics = next(c for c in segment.constraints.values() if c.type == "dynamics").fcn_znu
+    dynamics = next(c for c in phase.constraints.values() if c.type == "dynamics").fcn_znu
 
-    discretize = subprob.flags.get("discretize", "ms")
+    discretize = subprob.hyperparams.discretize.get("mode", "ms")
     propagate_from_nodes_flag = config.analysis.get("propagate_from_nodes", False)
 
-    H = int(getattr(subprob.flags, 'hp_segments', 1))
+    # ps only: controls between collocation nodes are reconstructed with "lagrange" or "foh"
+    # ms always uses foh either way
+    mesh_opts = AttrDict({
+        "discretize":            discretize,
+        "segments":              subprob.mesh.segments,
+        "control_interpolation": config.analysis.get("control_interpolation", "lagrange"),
+        "dilation_idx":          idx.nu.dilation_factor,
+    })
 
     if propagate_from_nodes_flag:
-        node_solver = integrators.make_node_propagation_solver(dynamics, params, n_steps=50)
+        node_solver = subprob.fcns.discretize.make_node_propagation_solver(dynamics, params, n_steps=50, **mesh_opts)
     else:
-        traj_solver = integrators.make_trajectory_solver(
-            dynamics, params, n_steps=500, discretize=discretize, hp_segments=H,
-        )
+        traj_solver = subprob.fcns.discretize.make_trajectory_solver(dynamics, params, n_steps=500, **mesh_opts)
 
     z_init = subprob.initial_guess.z_dense
     nu_init = subprob.initial_guess.nu_dense
@@ -63,34 +70,28 @@ def analyze_segment(subprob, config):
         nu_opt = np.asarray(iter_data.nu_opt)
 
         N = z_opt.shape[0]
-        if discretize == "ps":
-            if H > 1:
-                _, etau, _, _ = pseudospectral.flipped_radau_hp_operator(N - 1, H)
-            else:
-                _, etau, _, _ = pseudospectral.flipped_radau_differential_operator(N - 1)
-            tau_nodes = (etau + 1.0) / 2.0
-        else:
-            tau_nodes = np.linspace(0.0, 1.0, N)
+        tau_nodes = subprob.mesh.tau
 
         if propagate_from_nodes_flag:
-            _, z_nl, nu_nl = integrators.propagate_from_nodes(
+            _, z_nl, nu_nl = subprob.fcns.discretize.propagate_from_nodes(
                 z_opt, tau_nodes, nu_opt, dynamics, params, _solver=node_solver,
+                discretize=mesh_opts.discretize, segments=mesh_opts.segments,
             )
         else:
-            _, z_nl, nu_nl = integrators.propagate_trajectory(
+            _, z_nl, nu_nl = subprob.fcns.discretize.propagate_trajectory(
                 z_opt, tau_nodes, nu_opt, dynamics, params, _solver=traj_solver,
             )
 
         # an output from the config replaces the one built here with the same name
         outputs = auto_outputs(
-            segment,
+            phase,
             opt        = (z_opt,  nu_opt),
             nl_prop    = (z_nl,   nu_nl),
             init_guess = (z_init, nu_init),
         )
 
         # outputs the config declares
-        for output in segment.outputs.values():
+        for output in phase.outputs.values():
             if not hasattr(output, "compute_values"):
                 continue
 
@@ -140,10 +141,10 @@ def analyze_segment(subprob, config):
     return analyzed
 
 
-def auto_outputs(segment, **representations):
+def auto_outputs(phase, **representations):
     """Build one SI-unit output per state and control component, plus time and the augmented states."""
-    index_map = segment.index_map
-    nondim    = segment.nondim
+    index_map = phase.index_map
+    nondim    = phase.nondim
     idx       = index_map.indices
 
     sliced = {}
@@ -163,7 +164,7 @@ def auto_outputs(segment, **representations):
     for key in next(iter(sliced.values())):
         name = key.split(":", 1)[1] if ":" in key else key
         if any(sliced[rep][key].shape[1] == 0 for rep in sliced):
-            continue  # augmented block this segment does not have
+            continue  # augmented block this phase does not have
         outputs[name] = AttrDict({
             **{rep: sliced[rep][key] for rep in sliced},
             "limits":  None,
@@ -182,22 +183,22 @@ def auto_outputs(segment, **representations):
 _REPRESENTATIONS = (("opt", "t_opt"), ("nl_prop", "t_nl"), ("init_guess", "t_init_nl"))
 
 
-def pad_missing_outputs(per_segment):
-    """Fill the outputs a segment is missing with NaN, in place."""
+def pad_missing_outputs(per_phase):
+    """Fill the outputs a phase is missing with NaN, in place."""
     template = {}
-    for segment_data in per_segment:
-        for name, output in segment_data.outputs.items():
+    for phase_data in per_phase:
+        for name, output in phase_data.outputs.items():
             template.setdefault(name, output)
 
-    for segment_data in per_segment:
+    for phase_data in per_phase:
         for name, output in template.items():
-            if name in segment_data.outputs:
+            if name in phase_data.outputs:
                 continue
-            segment_data.outputs[name] = AttrDict({
-                key: np.full((len(segment_data[t_key]), output[key].shape[1]), np.nan)
+            phase_data.outputs[name] = AttrDict({
+                key: np.full((len(phase_data[t_key]), output[key].shape[1]), np.nan)
                 for key, t_key in _REPRESENTATIONS
             } | {
-                "limits":  _nan_like(output.limits, len(segment_data.t_nl)),
+                "limits":  _nan_like(output.limits, len(phase_data.t_nl)),
                 "quivers": [
                     {**q, "dirs": np.full_like(q["dirs"], np.nan),
                      "origins": None if q.get("origins") is None else np.full_like(q["origins"], np.nan)}
@@ -218,7 +219,7 @@ def _nan_like(limits, n):
 
 
 def concat(items):
-    """Join each segment's values end to end. Arrays that cannot be stacked keep the first segment's."""
+    """Join each phase's values end to end. Arrays that cannot be stacked keep the first phase's."""
     head = items[0]
 
     if isinstance(head, np.ndarray):
@@ -254,15 +255,16 @@ def run_method_variation(traj):
           type: method_variation
           methods:
             autoscvx-ms: {}
-            autoscvx-ps-h10:
-              flags:
-                discretize: ps
-                equal_dt: 0
-                hp_segments: 10
-                line_search: 1
-              penalty:
-                initial_state:
-                  vb: 'none'
+            autoscvx-ps:
+              hyperparams:
+                discretize:
+                  mode: ps
+                  equal_dt: 0
+                trust_region:
+                  line_search: 1
+                penalties:
+                  initial_state:
+                    vb: 'none'
     """
     from trajopt.trajectory_analyzer import TrajectoryAnalyzer
 
@@ -295,8 +297,8 @@ def run_mc_analysis(traj):
           seed: 42
           num:  10
           samples:
-            segments.entry.params.vehicle.bc: {type: normal, mu: 0.0, sigma: 10.0}
-            segments.entry.constraints.initial_state.value: {type: uniform, lb: [...], ub: [...]}
+            phases.entry.params.vehicle.bc: {type: normal, mu: 0.0, sigma: 10.0}
+            phases.entry.constraints.initial_state.value: {type: uniform, lb: [...], ub: [...]}
     """
     nominal_config = traj.config
     var_cfg        = nominal_config.variations

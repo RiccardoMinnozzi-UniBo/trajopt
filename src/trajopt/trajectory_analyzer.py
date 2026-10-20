@@ -5,7 +5,6 @@ import trajopt.utils.config_loader as config_loader
 import trajopt.analysis.analysis as analysis
 import trajopt.analysis.plotting as plotting
 from trajopt.analysis.results import Iterate
-from trajopt.trajectory import Trajectory
 from trajopt.utils.tools import deep_merge, recursive_attrdict
 
 
@@ -26,7 +25,7 @@ class _Tee:
 
 class TrajectoryAnalyzer():
 
-    def __init__(self, config_path, method_overrides=None) -> None:
+    def __init__(self, config_path, method_overrides=None, *, initial_guess=None) -> None:
 
         self._start_console_log()
 
@@ -36,9 +35,11 @@ class TrajectoryAnalyzer():
         if method_overrides:
             self.config.method = deep_merge(self.config.method, recursive_attrdict(method_overrides))
 
+        Trajectory = config_loader.resolve_formulation_trajectory_class(self.config.method)
         self.trajectory = Trajectory(self.config.trajectory)
         SCPMethod = config_loader.resolve_scp_method_class(self.config.method)
-        self.method = SCPMethod(self.config.method, self.trajectory)
+        self.method = SCPMethod(self.config.method, self.trajectory,
+                                **({"initial_guess": initial_guess} if initial_guess is not None else {}))
         self._solved = False
 
     def _start_console_log(self, path=None):
@@ -61,6 +62,20 @@ class TrajectoryAnalyzer():
     def solve(self):
         self.method.solve()
         self._solved = True
+
+    def export_guess(self, *, include_aux=True):
+        """Export phase guesses; omit aux for destination reconstruction."""
+        return self.method.export_guess(include_aux=include_aux)
+
+    def reset(self, *, initial_guess=None):
+        """Restart SCP from a Guess or phase mapping, resetting penalties and history.
+
+        Omitted phases use configured providers. Mesh or model changes require
+        reconfigure(); reset retains the compiled problem.
+        """
+        self.method.reset(initial_guess=initial_guess)
+        self._solved = False
+        self.__dict__.pop('results', None)
 
     def analyze(self):
         analysis_cfg = self.config.get("analysis", {})
@@ -114,13 +129,14 @@ class TrajectoryAnalyzer():
           and discards all compiled JAX kernels, so the next solve pays
           construction and JIT compilation again. Numeric ``params`` values on
           the JAX path (dynamics, nonconvex constraints/costs) can instead be
-          mutated in place on ``self.trajectory`` segments and are picked up on
+          mutated in place on ``self.trajectory`` phases and are picked up on
           the next solve without a rebuild.
         - ``${...}`` expressions were evaluated once at config load; editing a
           param they referenced does not re-evaluate them. Edit the resolved
           value directly.
         """
         print("Reconfiguring trajopt with updated config...")
+        Trajectory = config_loader.resolve_formulation_trajectory_class(self.config.method)
         self.trajectory = Trajectory(self.config.trajectory)
         SCPMethod = config_loader.resolve_scp_method_class(self.config.method)
         self.method = SCPMethod(self.config.method, self.trajectory)

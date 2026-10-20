@@ -25,7 +25,7 @@ def load_trajopt_config(config_path: str) -> AttrDict:
     config = load_yaml(config_path)
     config = _resolve_inheritance(config, _source=config_path)
     try:
-        return _eval_values(config, {"np": np}, segment_params={})
+        return _eval_values(config, {"np": np}, phase_params={})
     except Exception as e:
         raise type(e)(f"error evaluating expressions in '{config_path}': {e}") from None
 
@@ -33,24 +33,34 @@ def load_trajopt_config(config_path: str) -> AttrDict:
 # METHOD CLASS RESOLUTION
 # =============================================================================
 
-DEFAULT_METHOD_CLASS = "dev.scvx"
+DEFAULT_METHOD_CLASS      = "dev.scp_phases"
+DEFAULT_FORMULATION_CLASS = "dev.phases"
 
 
 def resolve_scp_method_class(method_config: AttrDict):
-    """Import and return the SCPMethod class named by method_config.method_class.
-
-    ``method_class`` (e.g. "sqp" or "scvx") selects which sibling package under
-    ``trajopt.methods`` to load the solver implementation from.
-    """
+    """The ``Method`` class exported by the ``trajopt.methods.<method_class>`` package."""
     method_class = method_config.get("method_class", DEFAULT_METHOD_CLASS)
+    return _import_package_attr("trajopt.methods", method_class, "Method")
+
+
+def resolve_formulation_trajectory_class(method_config: AttrDict):
+    """The ``Trajectory`` class exported by the ``trajopt.formulations.<formulation_class>`` package."""
+    formulation_class = method_config.get("formulation_class", DEFAULT_FORMULATION_CLASS)
+    return _import_package_attr("trajopt.formulations", formulation_class, "Trajectory")
+
+
+def _import_package_attr(root: str, name: str, attr: str):
+    target = f"{root}.{name}"
     try:
-        module = importlib.import_module(f"trajopt.methods.{method_class}.scp_method")
-    except ModuleNotFoundError:
-        raise ValueError(
-            f"unknown method_class '{method_class}': expected a package under "
-            "trajopt.methods (e.g. 'sqp' or 'scvx') containing a scp_method.py module"
-        ) from None
-    return module.SCPMethod
+        package = importlib.import_module(target)
+    except ModuleNotFoundError as e:
+        # only the package itself being absent means a bad name; anything else is a real import error
+        if e.name is None or not (target == e.name or target.startswith(e.name + ".")):
+            raise
+        raise ValueError(f"unknown class '{name}': no package {target}") from None
+    if not hasattr(package, attr):
+        raise ValueError(f"package {root}.{name} does not export '{attr}' from its __init__.py")
+    return getattr(package, attr)
 
 # =============================================================================
 # YAML LOADING
@@ -67,6 +77,9 @@ def load_yaml(path_str: str) -> AttrDict:
     except FileNotFoundError:
         raise FileNotFoundError(f"config not found: '{path_str}'") from None
 
+    if not isinstance(raw, dict):
+        raise ValueError(f"config '{path_str}' must contain a YAML mapping")
+
     config = expand_dot_keys(recursive_attrdict(raw))
     return _resolve_fcn_paths(config, base_dir)
 
@@ -74,8 +87,17 @@ def load_yaml(path_str: str) -> AttrDict:
 # INHERITANCE
 # =============================================================================
 
+def _resolve_inherit_path(raw: str, _source: str) -> str:
+    """A single 'inherit' entry resolved to an absolute file path."""
+    if raw.startswith("trajopt/"):
+        parts = raw.lstrip("/").split("/")
+        return str(importlib.resources.files(".".join(parts[:-1])).joinpath(parts[-1]))
+    source_dir = Path(_source).resolve().parent if _source != "unknown" else Path.cwd()
+    return str((source_dir / raw).resolve())
+
+
 def _resolve_inheritance(d: Any, _source: str = "unknown") -> Any:
-    """Recursively resolve 'inherit' keys, merging parent configs in."""
+    """Recursively resolve 'inherit' keys (a path or list of paths, later wins), merging parent configs in."""
     if not isinstance(d, dict):
         return d
 
@@ -83,17 +105,16 @@ def _resolve_inheritance(d: Any, _source: str = "unknown") -> Any:
 
     if "inherit" in d:
         raw = d["inherit"]
-        if raw.startswith("trajopt/"):
-            parts = raw.lstrip("/").split("/")
-            parent_path = str(importlib.resources.files(".".join(parts[:-1])).joinpath(parts[-1]))
-        else:
-            source_dir  = Path(_source).resolve().parent if _source != "unknown" else Path.cwd()
-            parent_path = str((source_dir / raw).resolve())
-        try:
-            parent = _resolve_inheritance(load_yaml(parent_path), _source=parent_path)
-            d = deep_merge(parent, d)
-        except Exception as e:
-            raise type(e)(f"error resolving 'inherit: {raw}' (from '{_source}'): {e}") from None
+        paths = raw if isinstance(raw, list) else [raw]
+        merged: dict = {}
+        for path in paths:
+            parent_path = _resolve_inherit_path(path, _source)
+            try:
+                parent = _resolve_inheritance(load_yaml(parent_path), _source=parent_path)
+                merged = deep_merge(merged, parent)
+            except Exception as e:
+                raise type(e)(f"error resolving 'inherit: {path}' (from '{_source}'): {e}") from None
+        d = deep_merge(merged, d)
         d.pop("inherit", None)
 
     return recursive_attrdict(d)
@@ -162,62 +183,80 @@ def _eval_string(expr_obj: str, ctx: dict) -> Any:
 
 
 def _eval_params(params: dict, ctx: dict) -> AttrDict:
-    """Evaluate a segment ``params`` block; sibling keys are visible in order."""
+    """Evaluate a phase ``params`` block; sibling keys are visible in order."""
     result = AttrDict({})
     local  = dict(ctx)
     for key, val in params.items():
-        result[key] = _eval_values(val, local, segment_params={})
+        result[key] = _eval_values(val, local, phase_params={})
         if not isinstance(result[key], dict):
             local[key] = result[key]
     return result
 
 
-def _eval_segment(segment: dict, name: str, segment_params: dict) -> AttrDict:
-    """Evaluate one segment: ``params`` first, then all remaining keys."""
+def _eval_phase(phase: dict, name: str, phase_params: dict) -> AttrDict:
+    """Evaluate one phase: ``params`` first, then all remaining keys."""
     ctx = {"np": np}
     out = AttrDict({})
 
-    if "params" in segment:
-        out.params = _eval_params(segment.params, ctx)
-        segment_params[name] = out.params
+    if "params" in phase:
+        out.params = _eval_params(phase.params, ctx)
+        phase_params[name] = out.params
         _bind_params(ctx, out.params)
-    elif name in segment_params:
-        _bind_params(ctx, segment_params[name])
+    elif name in phase_params:
+        _bind_params(ctx, phase_params[name])
 
-    for key, val in segment.items():
+    for key, val in phase.items():
         if key == "params":
             continue
-        out[key] = _eval_values(val, ctx, segment_params)
+        out[key] = _eval_values(val, ctx, phase_params)
 
     return out
 
 
-def _eval_values(obj: Any, ctx: dict, segment_params: dict, key: str | None = None) -> Any:
+def _eval_values(obj: Any, ctx: dict, phase_params: dict, key: str | None = None) -> Any:
     """Recursively evaluate ``${...}`` expressions in a config tree."""
     if isinstance(obj, dict):
-        if "segments" in obj and isinstance(obj.segments, dict):
+        if "phases" in obj and isinstance(obj.phases, dict):
             result = AttrDict(dict(obj))
-            result.segments = AttrDict({
-                name: _eval_segment(seg, name, segment_params)
-                for name, seg in obj.segments.items()
+            result.phases = AttrDict({
+                name: _eval_phase(seg, name, phase_params)
+                for name, seg in obj.phases.items()
             })
             for key, val in obj.items():
-                if key == "segments":
+                if key == "phases":
                     continue
-                result[key] = _eval_values(val, ctx, segment_params)
+                result[key] = _eval_values(val, ctx, phase_params)
             return result
+
+        if "params" in obj and isinstance(obj.params, dict):
+            # A flat (single-phase) trajectory/phase-like dict: evaluate its
+            # own params first so siblings can reference them as ``${params.x}``,
+            # same as a named phase under a multi-phase ``phases:`` block.
+            return _eval_phase(obj, key or "trajectory", phase_params)
 
         result = AttrDict({})
         local  = dict(ctx)
-        for k, v in obj.items():
-            result[k] = _eval_values(v, local, segment_params, key=k)
+
+        remaining = obj
+        if "trajectory" in obj and "method" in obj:
+            # root config: eval trajectory first so method: can also reference ${params.x}
+            result["trajectory"] = _eval_values(obj["trajectory"], local, phase_params, key="trajectory")
+            merged_params: dict = {}
+            for p in phase_params.values():
+                merged_params = deep_merge(merged_params, p)
+            if merged_params:
+                _bind_params(local, merged_params)
+            remaining = {k: v for k, v in obj.items() if k != "trajectory"}
+
+        for k, v in remaining.items():
+            result[k] = _eval_values(v, local, phase_params, key=k)
             bare = result[k]
             if not isinstance(bare, dict):
                 local[k] = bare
         return result
 
     if isinstance(obj, list):
-        results = [_eval_values(item, ctx, segment_params) for item in obj]
+        results = [_eval_values(item, ctx, phase_params) for item in obj]
         if all(isinstance(x, (int, float, np.number, np.ndarray)) for x in results):
             arr = np.array(results)
             if key and "idx" in key and arr.dtype.kind == "f" and np.all(arr == np.round(arr)):
@@ -226,6 +265,6 @@ def _eval_values(obj: Any, ctx: dict, segment_params: dict, key: str | None = No
         return results
 
     if isinstance(obj, str) and "${" in obj:
-        return _eval_values(_eval_string(obj, ctx), ctx, segment_params)
+        return _eval_values(_eval_string(obj, ctx), ctx, phase_params)
 
     return obj
