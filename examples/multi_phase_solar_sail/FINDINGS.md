@@ -395,3 +395,77 @@ affine in the two arc endpoints.  It is worth 53 m at 20 revolutions and reduces
 the 21-revolution iteration count from 39 to 26, so it is a mild convergence
 aid, not a feasibility lever.  Left at `1` in the shipped configuration because
 uniform spacing is easier to reason about and the solution is identical.
+
+## 9. Memory: CVXPY canonicalization does not fit in 16 GB
+
+Measured after porting the example to the refactored trajopt API (the
+`p-hp-pseudospectral` solver).  The 21-revolution solve needs far more memory
+than the solve itself would suggest, and the cost is paid entirely in CVXPY's
+one-off canonicalization at the first `cp.Problem.solve()`, before any SCP
+iteration runs.
+
+On a 16 GB machine (about 7.4 GB free) both 21-revolution solves failed there:
+
+| method | failure |
+| --- | --- |
+| PS (`config-ps.yaml`) | `_ArrayMemoryError: Unable to allocate 13.5 GiB for an array with shape (1810010709,) and data type int64`, raised in `cvxpy/reductions/solvers/conic_solvers/conic_solver.py` (`format_constraints` -> `matmul`) |
+| MS (`config.yaml`) | `MemoryError: bad allocation` while loading a JAX kernel, because it ran alongside the PS solve and the memory was already gone |
+
+The same configurations ran on a 64 GB machine (section 6), so this is a
+resource limit, not a regression in the port.
+
+### How the cost scales
+
+`get_problem_data(cp.CLARABEL)` measured with `tracemalloc` at small
+revolution counts:
+
+| config | revolutions | phases | parameters | rows | param tensor rows | canonicalization | peak memory |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| PS 24/4 | 2 | 3 | 8 880 | 2 122 | 3.45e6 | 3.4 s | 0.23 GiB |
+| PS 24/4 | 3 | 5 | 13 648 | 3 262 | 8.16e6 | 5.4 s | 0.53 GiB |
+| PS 24/4 | 4 | 7 | 18 416 | 4 402 | 1.48e7 | 7.5 s | 0.95 GiB |
+| MS 12/3 | 2 | 3 | 4 887 | 1 142 | 9.46e5 | 2.0 s | 0.07 GiB |
+| MS 12/3 | 3 | 5 | 7 589 | 1 773 | 2.28e6 | 3.0 s | 0.16 GiB |
+| MS 12/3 | 4 | 7 | 10 291 | 2 404 | 4.18e6 | 4.3 s | 0.28 GiB |
+
+Parameters, variables and constraint rows all grow linearly with the phase
+count, but the peak memory grows roughly with its *square*: CVXPY builds one
+parameter tensor for the whole multi-phase problem, with a row for every
+(constraint row, variable) pair, so the phases are not canonicalized
+independently even though they only couple at their boundaries.  The ratio
+peak / phases^2 is about 0.02 GiB for PS and 0.006 GiB for MS, which
+extrapolates at 21 revolutions (41 phases) to
+
+| config | estimated peak |
+| --- | --- |
+| PS 24/4 | ~30-35 GiB |
+| MS 12/3 | ~9-10 GiB |
+
+PS costs about three times more than MS because its mesh has twice the nodes
+and each collocation row couples a whole arc, not just two neighbouring nodes.
+The canonicalization runs once per solve, so every attempt in the revolution
+search pays it again.
+
+### Practical consequences
+
+* Run the 21-revolution validation on the 64 GB machine, and run the two
+  configurations one after the other, never in parallel.
+* On a 16 GB machine the full problem is out of reach for PS and borderline
+  for MS.  Small revolution counts (up to roughly 6) fit comfortably and are
+  enough for smoke tests or for comparing solver versions at equal size.
+* The revolution search keeps only the best problem alive (see `search.py`),
+  which bounds memory between solves but does not reduce the peak of any
+  single solve.
+
+### Possible mitigations (not tested)
+
+* Skip the parametric (DPP) canonicalization: `cp.Problem.solve(ignore_dpp=True)`
+  re-canonicalizes with numeric values each iteration instead of building the
+  parameter tensor once.  trajopt already declares a `hyperparams.flags.ignore_dpp`
+  flag in `methods/common/configs/default.yaml`, but nothing reads it, so it is
+  currently a no-op and would have to be wired into the `solve` call in
+  `methods/dev/scp_phases/scp_method.py`.  It trades memory for a slower
+  iteration.
+* Fewer nodes per arc shrink the peak, but only go below the 24/4 PS mesh if
+  the mesh study in section 6 still validates: that mesh was chosen for
+  accuracy, not for size.

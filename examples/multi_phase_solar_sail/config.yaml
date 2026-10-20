@@ -20,7 +20,7 @@
 #   problem.graveyard                the terminal orbit requirement
 #   problem.state_bounds             must bracket the trajectory; sets scaling
 #   problem.sunlit_nodes / eclipse_nodes   discretisation per arc
-#   method.flags.iter_max            SCP iteration budget
+#   method.hyperparams.convergence.iter_max   SCP iteration budget
 # ---------------------------------------------------------------------------
 
 problem:
@@ -257,70 +257,75 @@ problem:
 # Method / solver
 # ===========================================================================
 method:
-  inherit: trajopt/methods/dev/sqp/configs/autoscvx.yaml
+  # sqp with the second-order trust region: reaches its final accuracy in ~100
+  # iterations where first-order needs thousands
+  inherit: trajopt/methods/dev/scp_phases/configs/sqp/autoscvx2.yaml
 
-  flags:
+  hyperparams:
+    flags:
+      zoh_dilation: 1
+      quiet:        0
+
+    discretize:
+      equal_dt: 1
+      nsub:     6       # RK4 substeps per multiple-shooting interval
+
     # Convergence tests two things: that the iteration has stopped moving
     # (eps_state) and that every constraint buffer is satisfied (each
     # constraint's own eps).  They answer different questions, so they get
     # different numbers -- the defect tolerance is set from
     # problem.max_accumulated_defect_km and is far tighter than is sensible
     # as a "has the solution settled" threshold.
-    eps_state:    [1.0e-4]
-    equal_dt:     1
-    zoh_dilation: 1
-    second_order: 1     # second-order: reaches its final accuracy in ~100
-                        # iterations where first-order needs thousands
-    nsub:         6     # RK4 substeps per multiple-shooting interval
-    iter_max:     600
-    quiet:        0
+    convergence:
+      eps_state: [1.0e-4]
+      iter_max:  600
+
+    # Virtual buffers (slack) per constraint class.
+    #   vb: none     - hard constraint, the linearised form must hold from the
+    #                  first subproblem.  Only safe when the initial guess
+    #                  already satisfies it.
+    #   vb: standard - slack is added and the penalty autotune drives it to zero
+    #                  over the SCP iterations (the default).
+    penalties:
+      # trajopt's min_time cost sums the longitude over every node of the final
+      # segment, so its magnitude grows with the node count and it can outweigh
+      # the dynamics penalty: the optimiser then buys a shorter trajectory by
+      # leaving a dynamics defect.  Starting the dynamics penalty high restores
+      # the balance; raise it further if the defect stalls above the tolerance.
+      dynamics:
+        W:
+          penalty: True
+          autotune: True
+          init: 100.0
+
+      # The initial state is a linear constraint on the first node and the guess
+      # satisfies it exactly, so it needs no slack.  Left buffered, it is the
+      # cheapest place for the optimiser to find the perigee it cannot earn: the
+      # trajectory simply starts above GEO and "reaches" the graveyard for free.
+      initial_state:
+        vb: none
+
+      # The guess is propagated arc by arc and chained, so it is exactly
+      # continuous already, and all three continuity constraints are linear.
+      state_continuity:
+        vb: none
+      time_continuity:
+        vb: none
+      control_continuity:
+        vb: none
+
+      # The arc-end windows are linear in the longitude and the guess sits inside
+      # them, so they can be enforced hard.
+      final_nonconvex_inequality:
+        vb: none
+
+      # The shadow-terminator equality is genuinely nonlinear and the guess only
+      # satisfies it approximately, so it needs slack that the autotune removes.
+      final_nonconvex_equality:
+        vb: standard
 
   solver_opts:
-    solver: Clarabel    # ships with CVXPY and handles the terminal cones
-
-  # Virtual buffers (slack) per constraint class.
-  #   vb: none     - hard constraint, the linearised form must hold from the
-  #                  first subproblem.  Only safe when the initial guess
-  #                  already satisfies it.
-  #   vb: standard - slack is added and the penalty autotune drives it to zero
-  #                  over the SCP iterations (the default).
-  penalty:
-    # trajopt's min_time cost sums the longitude over every node of the final
-    # segment, so its magnitude grows with the node count and it can outweigh
-    # the dynamics penalty: the optimiser then buys a shorter trajectory by
-    # leaving a dynamics defect.  Starting the dynamics penalty high restores
-    # the balance; raise it further if the defect stalls above the tolerance.
-    dynamics:
-      W:
-        penalty: True
-        autotune: True
-        init: 100.0
-
-    # The initial state is a linear constraint on the first node and the guess
-    # satisfies it exactly, so it needs no slack.  Left buffered, it is the
-    # cheapest place for the optimiser to find the perigee it cannot earn: the
-    # trajectory simply starts above GEO and "reaches" the graveyard for free.
-    initial_state:
-      vb: none
-
-    # The guess is propagated arc by arc and chained, so it is exactly
-    # continuous already, and all three continuity constraints are linear.
-    state_continuity:
-      vb: none
-    time_continuity:
-      vb: none
-    control_continuity:
-      vb: none
-
-    # The arc-end windows are linear in the longitude and the guess sits inside
-    # them, so they can be enforced hard.
-    final_nonconvex_inequality:
-      vb: none
-
-    # The shadow-terminator equality is genuinely nonlinear and the guess only
-    # satisfies it approximately, so it needs slack that the autotune removes.
-    final_nonconvex_equality:
-      vb: standard
+    solver: CLARABEL    # ships with CVXPY and handles the terminal cones
 
 output:
   directory: results

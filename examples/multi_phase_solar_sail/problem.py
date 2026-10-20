@@ -49,7 +49,6 @@ from pathlib import Path
 
 import numpy as np
 
-from trajopt.trajectory import Trajectory
 from trajopt.utils import config_loader
 from trajopt.utils import tools
 from trajopt.utils.tools import AttrDict, recursive_attrdict
@@ -317,6 +316,8 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
 
     return recursive_attrdict({
         "num_nodes": int(settings.sunlit_nodes if sunlit else settings.eclipse_nodes),
+        # pseudospectral only: Radau segments per arc, which must divide num_nodes - 1
+        "hp_segments": int(settings.get("sunlit_hp_segments" if sunlit else "eclipse_hp_segments", 1)),
         "fcns": {
             "dynamics": f"{_SOURCE}:dynamics",
             "shadow_boundary": f"{_SOURCE}:shadow_boundary",
@@ -458,16 +459,16 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
             )
         else:
             segment.constraints.state_continuity = recursive_attrdict(
-                {"type": "state_continuity", "segment": previous_name}
+                {"type": "state_continuity", "phase": previous_name}
             )
             segment.constraints.longitude_continuity = recursive_attrdict(
-                {"type": "time_continuity", "segment": previous_name}
+                {"type": "time_continuity", "phase": previous_name}
             )
             # The sail attitude is physically continuous, and this also pins the
             # steering angle inside eclipse arcs, where it has no effect on the
             # dynamics and would otherwise be a free null direction.
             segment.constraints.control_continuity = recursive_attrdict(
-                {"type": "control_continuity", "segment": previous_name}
+                {"type": "control_continuity", "phase": previous_name}
             )
 
         if is_last:
@@ -526,7 +527,7 @@ def build_trajectory_config(settings: AttrDict) -> AttrDict:
         segments[name] = segment
         previous_name = name
 
-    return recursive_attrdict({"segments": segments})
+    return recursive_attrdict({"phases": segments})
 
 
 class SolarSailProblem:
@@ -577,7 +578,8 @@ class SolarSailProblem:
             )
 
         self.config.trajectory = build_trajectory_config(self.settings)
-        self.trajectory = Trajectory(self.config.trajectory)
+        trajectory_class = config_loader.resolve_formulation_trajectory_class(self.config.method)
+        self.trajectory = trajectory_class(self.config.trajectory)
         method_class = config_loader.resolve_scp_method_class(self.config.method)
         self.method = method_class(self.config.method, self.trajectory)
 
@@ -587,7 +589,8 @@ class SolarSailProblem:
 
     @property
     def segments(self):
-        return self.method.scp_trajectory.scp_segments
+        """The solved phases (trajopt subproblems), in chain order."""
+        return self.method.scp_trajectory.scp_phases
 
     def solve(self) -> bool:
         """Run SCP until convergence or the iteration budget is exhausted."""

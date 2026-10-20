@@ -44,7 +44,7 @@ def main(config_file: str | Path = DEFAULT_CONFIG) -> None:
     # the JAX kernels, which is far too expensive just to look up a flag.
     config = config_loader.load_trajopt_config(str(CONFIG_FILE))
     print(f"config: {CONFIG_FILE.name}  "
-          f"(discretisation: {config.method.flags.discretize})")
+          f"(discretisation: {config.method.hyperparams.discretize.mode})")
     settings = config.problem
     search = settings.revolution_search
     guess = int(settings.revolutions)

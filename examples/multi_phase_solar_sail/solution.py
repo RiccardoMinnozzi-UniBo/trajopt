@@ -9,7 +9,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from trajopt.methods.common import integrators, pseudospectral
+from trajopt.methods.common import discretize
 from trajopt.utils.tools import recursive_attrdict
 
 import solar_sail
@@ -386,10 +386,6 @@ def _chained_propagation(problem):
     dense)``, where ``dense`` holds the full-resolution trajectory the figures
     are drawn from.
     """
-    flags = problem.config.method.flags
-    discretize = flags.get("discretize", "ms")
-    hp = int(flags.get("hp_segments", 1))
-
     z_end = None
     dense_state, dense_longitude, dense_control = [], [], []
     dense_lit, dense_phase = [], []
@@ -399,23 +395,17 @@ def _chained_propagation(problem):
         nu_opt = np.asarray(data.nu_opt)
         n_nodes = z_opt.shape[0]
 
-        dynamics = next(c for c in segment.segment.constraints.values()
+        dynamics = next(c for c in segment.phase.constraints.values()
                         if c.type == "dynamics").fcn_znu
-
-        if discretize == "ps":
-            operator = (pseudospectral.flipped_radau_hp_operator(n_nodes - 1, hp) if hp > 1
-                        else pseudospectral.flipped_radau_differential_operator(n_nodes - 1))
-            tau = (operator[1] + 1.0) / 2.0
-        else:
-            tau = np.linspace(0.0, 1.0, n_nodes)
 
         z_start = z_opt[0] if z_end is None else z_end
         # ~200 samples per revolution: fine enough to resolve the eccentricity
         # vector turning over within an orbit, which a handful of nodes cannot
         n_steps = max(200, 40 * (n_nodes - 1))
-        _, z_dense, nu_dense = integrators.propagate_trajectory(
-            np.vstack([z_start, z_opt[1:]]), tau, nu_opt, dynamics, segment.params,
-            discretize=discretize, n_steps=n_steps, hp_segments=hp,
+        _, z_dense, nu_dense = discretize.propagate_trajectory(
+            np.vstack([z_start, z_opt[1:]]), segment.mesh.tau, nu_opt, dynamics, segment.params,
+            discretize=segment.mesh.discretize, n_steps=n_steps, segments=segment.mesh.segments,
+            dilation_idx=segment.index_map.indices.nu.dilation_factor,
         )
         z_end = z_dense[-1]
 
@@ -534,7 +524,7 @@ def extract_solution(problem) -> SolarSailSolution:
     defect_history, step_history, cost_history = _solver_history(problem)
     true_perigee, true_eccentricity, accumulated, dense = _chained_propagation(problem)
     eps_nd = float(np.atleast_1d(
-        list(problem.segments.values())[0].constraints.dynamics.penalty_state.eps)[0])
+        list(problem.segments.values())[0].constraints.dynamics.penalties.eps)[0])
 
     return SolarSailSolution(
         longitude_rad=longitude,
