@@ -1,0 +1,39 @@
+# Method settings for a flow stage that starts from an earlier stage's solution.
+#
+# Apply it to every seeded stage, inline in the flow file:
+#
+#     - name: ms
+#       config: ms.yaml
+#       initial_guess: {from: p}
+#       method: {inherit: warm_start.yaml}
+#
+# Why: a flow hands over the *primal* trajectory only.  The penalty weights
+# restart at W.init, the duals at zero, and the second-order trust region has
+# only its Levenberg-Marquardt damping (lm_mu_init, 1e-8) until the duals build
+# up.  From a cold guess that is what you want.  From a converged one, with
+# collocation's W.init of 1, the first subproblem trades dynamics defect for
+# minimum-time cost and the iteration walks away from the guess -- to a
+# *different, worse* local optimum.  Measured at 3 revolutions (FINDINGS.md
+# section 11), collocation seeded from its own converged solution (p -> p) and
+# from a converged shooting one (ms -> p); a cold start reaches 1.9791 d:
+#
+#     seeded stage settings      p -> p            ms -> p
+#     defaults                   27 it, 1.9806 d   10 it, 2.4721 d
+#     W.init 100 (this file)      6 it, 1.9791 d    7 it, 1.9791 d
+#     lm_mu_init 1                6 it, 1.9791 d    4 it, 1.9792 d
+#     both                        3 it, 1.9791 d    3 it, 1.9791 d
+#
+# The damping is NOT used: on a shooting stage (p -> ms) lm_mu_init 1 made the
+# steps so short that the step-size convergence test fired early, at 1.9944 d
+# against 1.9789 d without it.  A high starting penalty only shapes the first
+# iterations -- W autotunes from there -- and does not change what a stage
+# converges to.  Shooting already starts at 100 (ms.yaml), so for a shooting
+# stage this file changes nothing.
+#
+# Inherited inside `method:`, so its keys are method-level.
+
+hyperparams:
+  penalties:
+    dynamics:
+      W:
+        init: 100.0

@@ -33,7 +33,7 @@ window of 0.05 rad still leaves every arc at least 0.2 rad long.
 Simplifications relative to the reference
 -----------------------------------------
 * Only Earth gravity (no lunar/solar third-body perturbations).
-* Fixed inertial Sun direction (no time-varying ephemeris).
+* Sun line rotating uniformly in the equatorial plane (no ephemeris).
 
 Scaling
 -------
@@ -46,9 +46,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
+from trajopt.flows.transfer import phase_layouts, transfer_guesses
 from trajopt.utils import config_loader
 from trajopt.utils import tools
 from trajopt.utils.tools import AttrDict, recursive_attrdict
@@ -299,7 +301,14 @@ def _build_segment(settings: AttrDict, sunlit: bool) -> AttrDict:
         ),
         # 1 in sunlight, 0 in eclipse; multiplies the whole sail acceleration.
         "illumination": 1.0 if sunlit else 0.0,
-        "final_eccentricity_max": float(settings.graveyard.eccentricity_max),
+        # The eccentricity cone gets the same treatment as the perigee cone
+        # below, and for the same reason: minimum time parks the nodal value on
+        # the cap, and the propagated one then sits over it by the interpolation
+        # error.  Again the margin is applied here only.
+        "final_eccentricity_max": float(
+            settings.graveyard.eccentricity_max
+            - float(settings.graveyard.get("eccentricity_margin", 0.0))
+        ),
         # The cone is asked for the requirement PLUS a margin.  Minimum time
         # drives the *nodal* perigee exactly onto whatever it is given, and the
         # propagated trajectory then lands short by the discretisation error, so
@@ -414,6 +423,14 @@ def _add_minimum_time_cost(segment: AttrDict, settings: AttrDict) -> None:
 
 def build_trajectory_config(settings: AttrDict) -> AttrDict:
     """Expand the compact problem settings into the full multi-segment config."""
+    # problem.yaml leaves the mesh to the algorithm on purpose, so that no
+    # algorithm silently inherits another one's node counts.
+    missing = [key for key in ("sunlit_nodes", "eclipse_nodes") if key not in settings]
+    if missing:
+        raise ValueError(
+            f"problem.{' and problem.'.join(missing)} not set: the mesh belongs to "
+            "the algorithm, so set it in the algorithm file (see algorithms/ms.yaml)"
+        )
     phases = phase_boundaries(settings)
     x0 = _initial_state(settings)
     initial_longitude = phases[0][0]
@@ -551,6 +568,15 @@ class SolarSailProblem:
     method_overrides:
         Optional ``method.*`` settings, deep-merged after loading the YAML, for
         sweeping solver options without editing the file.
+    initial_guess:
+        Optional ``{phase name: trajopt Guess}``, typically
+        :meth:`export_guess` of an earlier solve of the same problem under a
+        different discretisation (see :mod:`algorithm`).  Phases left out use
+        the propagated guess configured in the problem.
+    guess_layouts:
+        The :meth:`phase_layouts` of the problem ``initial_guess`` came from.
+        When given, every guessed phase is checked against this problem's
+        state/control channels before the method is built.
     """
 
     def __init__(
@@ -558,6 +584,8 @@ class SolarSailProblem:
         config_path: str | Path,
         problem_overrides: dict | None = None,
         method_overrides: dict | None = None,
+        initial_guess: dict | None = None,
+        guess_layouts: dict | None = None,
     ) -> None:
         self.config_path = Path(config_path).resolve()
         self.config = config_loader.load_trajopt_config(str(self.config_path))
@@ -580,8 +608,16 @@ class SolarSailProblem:
         self.config.trajectory = build_trajectory_config(self.settings)
         trajectory_class = config_loader.resolve_formulation_trajectory_class(self.config.method)
         self.trajectory = trajectory_class(self.config.trajectory)
+        if initial_guess is not None and guess_layouts is not None:
+            # trajopt's own flow check: same phase names, channels and units
+            source = SimpleNamespace(name="initial_guess", trajectory=initial_guess,
+                                     layouts=guess_layouts)
+            initial_guess = transfer_guesses(source, self.phase_layouts())
         method_class = config_loader.resolve_scp_method_class(self.config.method)
-        self.method = method_class(self.config.method, self.trajectory)
+        self.method = method_class(
+            self.config.method, self.trajectory,
+            **({} if initial_guess is None else {"initial_guess": initial_guess}),
+        )
 
     @property
     def revolutions(self) -> int:
@@ -596,3 +632,17 @@ class SolarSailProblem:
         """Run SCP until convergence or the iteration budget is exhausted."""
         self.method.solve()
         return bool(self.method._converged)
+
+    def export_guess(self) -> dict:
+        """The current iterate as ``{phase name: Guess}``, mesh-independent.
+
+        Feed it to another :class:`SolarSailProblem` as ``initial_guess`` to warm
+        start a different discretisation of the same problem: trajopt resamples
+        it onto the new mesh (polynomially from collocation, linearly from
+        shooting).
+        """
+        return self.method.export_guess(include_aux=False)
+
+    def phase_layouts(self) -> dict:
+        """Per-phase state/control channel layout, for checking a guess transfer."""
+        return phase_layouts(self.trajectory, self.config.trajectory)

@@ -1,8 +1,12 @@
 # Multi-phase solar sail: validated solutions and solver findings
 
 Both discretisations now produce **fully validated** minimum-time deorbit
-solutions. Reproduce with `python main.py` (MS) and `python main.py
+solutions. Reproduce with `python main.py config.yaml` (MS) and `python main.py
 config-ps.yaml` (PS).
+
+Sections 1-8 were measured on the pre-merge solver.  Section 10 re-validates
+both configurations on the merged `p-hp-pseudospectral` solver and records the
+configuration changes that took; its numbers supersede the ones below.
 
 ## 1. Solutions
 
@@ -171,6 +175,9 @@ Found by comparing against Kelly & Bevilacqua (2021).
    accuracy in ~100 and then plateaus exactly, so a large `iter_max` is wasted.
 
 ## 4. trajopt changes made
+
+These were made to the pre-merge `methods/dev/{sqp,scvx}` solver, which the
+`p-hp-pseudospectral` merge removed.  Section 10 records what became of each.
 
 | file | change |
 | --- | --- |
@@ -469,3 +476,197 @@ search pays it again.
 * Fewer nodes per arc shrink the peak, but only go below the 24/4 PS mesh if
   the mesh study in section 6 still validates: that mesh was chosen for
   accuracy, not for size.
+
+## 10. Re-validation on the merged `p-hp-pseudospectral` solver
+
+Re-run after merging `p-hp-pseudospectral` (solver `dev.scp_phases`,
+formulation `dev.phases`) on the 64 GB machine, one configuration at a time.
+Both methods still solve the 21-revolution problem and still fail at 20, but
+three configuration changes were needed to make collocation's verdict
+dependable, and one solver interaction was found that can stall a solve.
+
+### Results with the shipped configurations
+
+| | MS (`config.yaml`) | PS (`config-ps.yaml`) |
+| --- | --- | --- |
+| 21 rev: verdict | **validated** | **validated** |
+| SCP iterations | 30 | 72 |
+| elapsed time | 20.1007 d | 20.1123 d |
+| true r_p - r_GEO | +250.32 km | +250.09 km |
+| true eccentricity | 0.003000 | 0.002994 |
+| accumulated defect | -0.005 km | -0.004 km |
+| max defect / tolerance | 4.36e-06 / 1.11e-05 | 3.73e-07 / 5.52e-06 |
+| re-propagation error | 4.3e-06 | 2.2e-04 |
+| wall time (JAX warm-up) | 442 s (326 s) | 439 s (54 s) |
+| 20 rev: verdict | fails: "converges" in 24 it, propagated r_p 5.0 km short, e = 0.00308 | fails: stationary from it ~50, final-arc defect pinned at 3.0x tol |
+
+The 20-revolution shooting figure (+245.00 km) is identical to the pre-merge
+one, and the elapsed times agree with section 1 to 0.01 %.
+
+### What the merged solver needed
+
+**1. The step tolerance was silently tied to the dynamics tolerance.**  The
+merged sqp configs wire `fcns.convergence.init_tolerances` to
+`init_tolerances_from_dynamics`, which ignores `convergence.eps_state` and sets
+the step tolerance to the dynamics eps (5.5e-06 for collocation).  This is the
+pre-merge fix "eps_state reads flags.eps_state", lost in the refactor.  It is
+not just slower: it lets a solve stall (point 4 below).  `config.yaml` now
+wires `init_tolerances` back to `convergence.py:init_tolerances`, so the
+`eps_state: 1e-4` it always declared applies again.  Measured effect at 21
+revolutions: shooting 33 -> 30 iterations; collocation with the shipped
+margins went from stalled (still infeasible at iteration 110) to converged in
+72, and with the perigee margin alone 59 -> 50.  Elapsed times unchanged to
+1e-4 d.
+
+**2. Collocation needs an eccentricity margin.**  With no margins, collocation
+validated at 21 revolutions but only on validator slack: propagated perigee
+14 m short (inside the 100 m slack) and eccentricity at 0.003000.  With a
+0.1 km perigee margin the perigee cleared by 109 m but the propagated
+eccentricity came out ~1e-6 over the cap, and of two runs differing only in
+the step tolerance one passed the 1e-6 slack and one did not.  The cause is
+collocation's re-propagation error, ~2e-4 against shooting's ~1e-6; times the
+f, g scale of 0.02 that is ~4e-6 in eccentricity, which minimum time leaves
+entirely on the cap.  `graveyard.eccentricity_margin` (new, nodal cone only,
+like the perigee margin) is set to 5e-6 for collocation and 0 for shooting.
+Cost: +0.002 d.
+
+**3. The perigee margin no longer hurts collocation.**  Section 8.3 recorded
+that a 300 m margin pushed collocation's defect past tolerance.  On the merged
+solver its defect sits under a tenth of tolerance, and `config-ps.yaml` now
+asks for 0.1 km.
+
+**4. `iter_max` 600 -> 250.**  An infeasible revolution count never converges,
+so `iter_max` is what each failing step of the revolution search costs.
+Collocation at 20 revolutions was stationary from iteration ~50; running to
+600 would take ~40 min at ~4 s per subproblem.  Every feasible solve here
+converged in 30-75 iterations.
+
+### Solver findings (not fixed)
+
+1. **The SQP penalty autotune can let the objective win after it freezes.**
+   `penalties._autotune_W_b_standard` sets
+   `W <- W * (|vb| / (0.01 eps))^(0.9 rho)`, so whenever a buffer is below 1 %
+   of its tolerance the weight *shrinks*, and with `vb` near zero it can drop by
+   orders of magnitude in one iteration.  `_rho_b` then freezes the autotune at
+   `freeze_iters = 100` (rho = 0, or 0.05 only once the step has settled).  At
+   21 revolutions with the eccentricity margin and the step tolerance tied to
+   the defect eps, collocation was feasible from iteration ~30 (final-arc
+   `vb_dyn/eps` 0.01-0.2) but kept drifting on the tight step tolerance, and
+   from ~90 the minimum-time cost bought a final-arc defect of 3-18x tolerance;
+   it was still there at iteration 110 when it was stopped.  W itself was not
+   logged: the decay is inferred from the update rule and that buffer history,
+   so instrument `penalties.W` before building on this.  The configuration avoids it by
+   converging well before iteration 100 (point 1), but anything that slows
+   convergence -- a harder sail, more revolutions, a finer mesh -- can bring it
+   back.  Symptom to look for: `vb_dyn/eps` > 1 on the last phase only, with
+   `dx/eps` < 1 everywhere.  A floor on W (e.g. never below `W.init`), or no
+   decrease while the buffer is already feasible, would remove it.
+2. **Infeasible revolution counts cost the full iteration budget.**  There is
+   no stall detector: a solve whose step has stopped (`dx/eps` ~ 1e-3) while a
+   buffer stays above tolerance runs to `iter_max`.  For the revolution search
+   a "stationary and infeasible for K iterations" exit would cut each failing
+   step to a few minutes.
+3. **Per-phase kernel compilation dominates shooting's runtime.**  326 s of
+   shooting's 442 s is the JAX warm-up: `dynamics_compile_second_order_ms`
+   builds and jits a fresh propagator and Lagrangian-Hessian per phase, so the
+   41 phases compile 41 times although only two node counts occur.  The SCP
+   iterations themselves take 15 s.  Caching the kernels by
+   `(dynamics, num_nodes, nsub)` with the phase parameters passed as
+   arguments would cut a shooting solve to about two minutes, which matters
+   for parameter sweeps.
+4. **Collocation's subproblem is ~60x slower than shooting's**, about 4 s
+   against 70 ms per Clarabel solve, for twice the nodes.  Not investigated.
+5. **Memory** is unchanged from section 9: collocation peaked at 33 GB, during
+   the one-off CVXPY canonicalization.  `hyperparams.flags.ignore_dpp` is still
+   not wired.
+6. `convergence.check_convergence_tolerance` again enumerates constraint
+   categories by name (the pre-merge "every buffered constraint" version was
+   reverted in 1eed418).  Harmless here, because `initial_state` is `vb: none`,
+   but a buffered boundary condition would again be exempt from the
+   feasibility test.
+
+### Other pre-merge fixes
+
+* The PS mesh relation / frozen phase boundaries (section 4, row 3) no longer
+  applies: the merged solver carries time as a state with a per-segment
+  dilation.  The shadow-terminator equality is met (`vb_eq/eps` <= 0.08) and the
+  largest longitude jump across a boundary is 8e-11 rad.
+* The PS defect is now mapped to state units through the inverse of the Radau
+  differentiation block (`dynamics_compile_ps`, `ps_Dinv`) rather than weighted
+  by quadrature weights, so the validator's defect comparison between the two
+  methods remains like for like.
+
+## 11. Algorithms and flows
+
+The example was restructured so that new algorithms can be defined and compared
+without touching the problem: `problem.yaml` holds the problem, each file in
+`algorithms/` is a way of solving it -- a single method (`ms`, `p`, `hp`) or a
+flow chaining several with warm starts (`p_to_ms`, `p_to_ms_to_hp`) -- and
+`main.py`, `search.py` and the new `compare.py` take any of them.
+`algorithms/README.md` is the how-to.  `config.yaml` and `config-ps.yaml` are now
+aliases of `algorithms/ms.yaml` and `algorithms/p.yaml`; their resolved method,
+problem and 41-phase trajectory configurations are identical to before the
+restructuring (except that collocation no longer carries shooting's unused
+`nsub: 6`).
+
+### Warm starts walk away from the guess unless the penalty starts high
+
+A flow hands over the primal trajectory only: the penalty weights restart at
+`W.init`, the duals at zero, and the second-order trust region has only its
+Levenberg-Marquardt damping (`lm_mu_init`, 1e-8) until the duals build up.  The
+transferred guess itself is faithful -- installed into the next stage it matches
+the source solution to machine precision, with a dynamics defect of 0.03x
+tolerance (p -> p) to 12x (ms -> p, linear interpolation seen by a Radau
+derivative).  But with collocation's `W.init` of 1 the first subproblem trades
+dynamics defect for minimum time, the step is 300-1500x the step tolerance, and
+the stage converges somewhere else.  At 3 revolutions (graveyard relaxed to
+15 km so that it is feasible), cold collocation reaches 1.9791 d:
+
+| seeded stage settings | p -> p | ms -> p | p -> ms |
+| --- | --- | --- | --- |
+| defaults | 27 it, 1.9806 d | 10 it, **2.4721 d** | 12 it, 1.9789 d |
+| `W.init` 100 | 6 it, 1.9791 d | 7 it, 1.9791 d | (default for ms) |
+| `lm_mu_init` 1 | 6 it, 1.9791 d | 4 it, 1.9792 d | |
+| both | 3 it, 1.9791 d | 3 it, 1.9791 d | 11 it, **1.9944 d** |
+
+The 2.47-day answer validates, so nothing flags it: a comparison of algorithms
+would silently report a flow as 25 % worse than it is.  `algorithms/warm_start.yaml`
+starts the dynamics penalty at 100 and every seeded stage in the shipped flows
+inherits it; `algorithm.py` warns about any seeded stage whose dynamics penalty
+starts below 10.  The damping is deliberately not used: on a shooting stage it
+shortened the steps until the step-size convergence test fired early (1.9944 d).
+
+Solver-side, a flow could hand over the duals and penalty weights with the
+trajectory; trajopt's `Guess` carries neither.
+
+### 21 revolutions
+
+All stages converge and validate:
+
+| algorithm | stage | iterations | compile | SCP | total | elapsed | r_p - r_GEO | e |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ms (section 10) | ms | 30 | 326 s | ~15 s* | 442 s | 20.1007 d | +250.32 km | 0.003000 |
+| p (section 10) | p | 72 | 54 s | ~300 s | 439 s | 20.1123 d | +250.09 km | 0.002994 |
+| hp | hp | 29 | 59 s | 67 s | 145 s | 20.1175 d | +250.10 km | 0.002994 |
+| p_to_ms_to_hp | p | 72 | 58 s | 376 s | 450 s | 20.1123 d | +250.09 km | 0.002994 |
+| | ms <- p | 28 | 328 s | 84 s | 419 s | 20.0989 d | +250.32 km | 0.003000 |
+| | hp <- ms | 15 | 75 s | 54 s | 139 s | 20.0997 d | +250.10 km | 0.002995 |
+
+\* the reporter's sum of per-iteration times; `compare.py`'s SCP column also
+includes CVXPY's one-off canonicalisation, which is why it reads higher.
+
+* **hp is the cheapest single method here**: 145 s, a third of p or ms.  Its
+  subproblem solves much faster than p's (the segment differentiation blocks are
+  smaller and sparser), and it converged in 29 iterations to p's 72.
+* **The flow improves the hp answer**: seeded from shooting, hp converges in 15
+  iterations to 20.0997 d against 20.1175 d from a cold start -- 0.018 d
+  (26 min) better.  The problem has several nearby local optima and which one an
+  algorithm finds depends on where it starts; any comparison of methods should
+  report the starting point along with the answer.
+* Every flow stage pays its own setup again (shooting ~5.5 min of JAX
+  compilation), so a warm-started shooting stage costs about as much as a cold
+  one even though it needs fewer iterations.
+* The hp terminal margins are inherited from p and held here (perigee +100 m,
+  e 5e-6 inside the cap): hp's re-propagation error, 1.4-1.5e-4, is below p's
+  2.2e-4, which the margins were sized for.  Re-check it before reusing them on
+  a different hp mesh.

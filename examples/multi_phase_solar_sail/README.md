@@ -24,15 +24,38 @@ else follows the paper.
 ## Running it
 
 ```bash
-python main.py                  # RK4 multiple shooting (config.yaml)
-python main.py config-ps.yaml   # flipped Legendre-Radau collocation
+python main.py config.yaml      # RK4 multiple shooting
+python main.py config-ps.yaml   # flipped Legendre-Radau collocation (also the default)
 ```
 
-Two configurations ship, and they solve **the same 21-revolution problem** with
+The problem and the ways of solving it are kept apart:
+
+| file | contents |
+| --- | --- |
+| `problem.yaml` | the problem: physics, terminal requirement, guess, revolution search |
+| `algorithms/*.yaml` | algorithms: a mesh plus a method (`ms`, `p`, `hp`), or a **flow** chaining them with warm starts (`p_to_ms`, `p_to_ms_to_hp`) |
+| `config.yaml`, `config-ps.yaml` | aliases of `algorithms/ms.yaml` and `algorithms/p.yaml` |
+| `main.py` | one algorithm: revolution search, validation, figures |
+| `compare.py` | several algorithms on the same problem, as a table and CSV |
+
+```bash
+python main.py algorithms/p_to_ms_to_hp.yaml --no-search -n 21
+python compare.py algorithms/ms.yaml algorithms/p.yaml algorithms/hp.yaml --csv study.csv
+python main.py algorithms/ms.yaml --set problem.sail.area_to_mass_m2_kg=5
+```
+
+[`algorithms/README.md`](algorithms/README.md) explains how to define a new
+algorithm or flow, and what to watch for when warm-starting one stage from
+another.
+
+The two original configurations solve **the same 21-revolution problem** with
 the two discretisations. 21 is the minimum for this sail: both methods reach it,
-and 20 fails for both. `config-ps.yaml` inherits `config.yaml` and overrides only
-what belongs to the discretisation — the mesh, the terminal margin and the
-dynamics penalty initialisation — so the two cannot drift apart on the physics.
+and 20 fails for both. Both inherit `problem.yaml` and add only what belongs to
+the discretisation — the mesh, the terminal margins and the dynamics penalty
+initialisation — so they cannot drift apart on the physics.
+
+Measured on the merged `p-hp-pseudospectral` solver (`dev.scp_phases`), one
+solve each at the guess, on a 64 GB machine:
 
 | | multiple shooting | pseudospectral |
 | --- | --- | --- |
@@ -41,26 +64,31 @@ dynamics penalty initialisation — so the two cannot drift apart on the physics
 | nodes per sunlit / eclipse arc | 12 / 3 | 24 / 4 |
 | total nodes | 272 | 544 |
 | dynamics penalty `W.init` | 100 | 1.0 |
-| terminal margin | 0.3 km | 0 |
-| elapsed time | **20.101 days** | **20.114 days** |
-| revolutions flown | 20.037 | 20.039 |
-| true final perigee radius | r_GEO + 250.34 km | r_GEO + 250.10 km |
-| true final eccentricity | 0.003000 (cap 0.003) | 0.002995 |
-| accumulated defect | -0.033 km (budget 3.0) | -0.022 km |
-| max dynamics defect | 1.59e-06 (tol 1.11e-05) | 5.00e-07 (tol 5.52e-06) |
-| shortest phase | 1.160 h | 1.160 h |
-| SCP iterations | 39 | **15** |
-| runtime | 569 s | **234 s** |
+| terminal margins (perigee / eccentricity) | 0.3 km / 0 | 0.1 km / 5e-6 |
+| elapsed time | **20.101 days** | **20.112 days** |
+| true final perigee radius | r_GEO + 250.32 km | r_GEO + 250.09 km |
+| true final eccentricity | 0.003000 (cap 0.003) | 0.002994 |
+| accumulated defect | -0.005 km (budget 3.0) | -0.004 km |
+| max dynamics defect | 4.36e-06 (tol 1.11e-05) | 3.73e-07 (tol 5.52e-06) |
+| max re-propagation error | 4.3e-06 | 2.2e-04 |
+| SCP iterations | 30 | 72 |
+| runtime (of which JAX warm-up) | 442 s (326 s) | 439 s (54 s) |
+| peak memory | — | 33 GB |
 | validated | **yes** | **yes** |
 
 The two elapsed times agree to **0.06 %** — two independent discretisations, two
 meshes and two penalty balances reaching the same transfer is the strongest
 evidence available that it is right.
 
-The eccentricity cap is active in both: the sail arrives with nothing to spare
-on it, which is what a minimum-time solution should look like. The perigee has
-100–340 m of room because the nodal cone is asked for a margin; see
+The eccentricity cap is active: the sail arrives with nothing to spare on it,
+which is what a minimum-time solution should look like (collocation's 6e-6 of
+room is its margin, not slack in the transfer). The perigee has 90–320 m of
+room for the same reason; see
 [The settings that differ between the methods](#the-settings-that-differ-between-the-methods).
+The two methods spend their time very differently: shooting's subproblem solves
+in ~70 ms but compiling its 41 sets of second-order JAX kernels takes over five
+minutes, while collocation compiles in under one but its Clarabel subproblem
+takes ~4 s.
 
 Every "true" quantity above comes from re-integrating the whole trajectory end
 to end from the exact initial state, using each method's own control model and
@@ -79,7 +107,7 @@ that turned out not to matter.
 | setting | shooting | collocation | why |
 | --- | --- | --- | --- |
 | mesh | 12 / 3 | 24 / 4 | collocation needs more points per arc; its residual is small at 12 nodes while the re-propagated trajectory drifts 5.3 km |
-| `graveyard.perigee_margin_km` | 0.3 | 0 | minimum time parks the *nodal* perigee on the constraint, so the propagated orbit lands short by the discretisation error. Shooting needs 300 m of margin; collocation does not, and is pushed past its defect tolerance by it |
+| `graveyard.perigee_margin_km` / `eccentricity_margin` | 0.3 / 0 | 0.1 / 5e-6 | minimum time parks the *nodal* perigee and eccentricity on the constraints, so the propagated orbit misses them by the discretisation error. Shooting's gap is on the perigee; collocation's re-propagation error (~2e-4) puts its gap mostly on the eccentricity, which without the margin sat ~1e-6 over the cap and flipped the verdict between near-identical runs |
 | `penalty.dynamics.W.init` | 100 | 1.0 | **worth two revolutions.** trajopt's `min_time` cost sums over nodes, so its magnitude grows with the node count and the same penalty weight sits very differently against it. At 100 collocation cannot solve 22 revolutions at all; at 1.0 it solves 21 in 15 iterations. Shooting wants the opposite |
 
 The last one is the trap: with the wrong value collocation looks like it has a
@@ -97,10 +125,10 @@ informative as the fixes. `FINDINGS.md` section 8 has the measurements.
 2. **End the phase chain at the last shadow entry**, not at a whole number of
    revolutions. The old form forced a final eclipse plus a 0.056 rad sunlit stub
    that did no work, and cost two revolutions on its own.
-3. **Give the nodal terminal cone a margin** — for shooting only. Minimum time
-   parks the nodal perigee on the constraint, so the propagated orbit lands
-   short; without the margin the solution missed by 75 m and passed only on
-   validator slack.
+3. **Give the nodal terminal cones a margin**, sized per discretisation.
+   Minimum time parks the nodal perigee and eccentricity on the constraints,
+   so the propagated orbit misses them by the discretisation error: shooting
+   missed the perigee by 75 m, collocation sat ~1e-6 over the eccentricity cap.
 4. **Set the dynamics penalty per discretisation.** Worth two more revolutions
    for collocation, and the hardest to find, because the symptom is
    indistinguishable from the method being unable to solve the problem.
@@ -157,23 +185,29 @@ validator's 100 m slack, and at a 20/3 mesh it failed outright. With 300 m of
 margin it lands comfortably above the requirement.
 
 The gap belongs to the discretisation, so the margin does too, and it sits with
-the node counts. Collocation at 24 nodes per arc does not need it, and
-`config-ps.yaml` sets it to zero: asking that mesh for the extra 300 m moves the
-propagated perigee up by 300 m but pushes the per-interval defect from 4.82e-06
-to 6.91e-06, past its tolerance, so the solve stops validating.
+the node counts. `graveyard.eccentricity_margin` does the same for the
+eccentricity cone. Shooting re-propagates to ~1e-6, which is ~2e-8 in
+eccentricity, so it needs none. Collocation re-propagates to ~2e-4, which is
+~4e-6 in eccentricity: with no margin it landed 14 m short on perigee (passing
+only on the slack) and ~1e-6 over the eccentricity cap, and whether that
+passed the validator's 1e-6 slack varied between runs that differed only in a
+convergence tolerance. `config-ps.yaml` therefore asks for 0.1 km and 5e-6.
+
+On the older solver collocation was pushed past its defect tolerance by a 300 m
+perigee margin. On the merged `p-hp-pseudospectral` solver its defect sits at
+under a tenth of tolerance, so that no longer applies.
 
 ### Discretisation: multiple shooting or pseudospectral
 
 ```bash
-python main.py                  # RK4 multiple shooting (config.yaml)
-python main.py config-ps.yaml   # flipped Legendre-Radau collocation
+python main.py config.yaml      # RK4 multiple shooting
+python main.py config-ps.yaml   # flipped Legendre-Radau collocation (also the default)
 ```
 
-`config-ps.yaml` inherits `config.yaml` and overrides only what belongs to the
-discretisation — the mesh, the terminal margin and the dynamics penalty — so the
-two cannot drift apart on the physics. Both reach a validated solution at 21
-revolutions and agree on the elapsed time to 0.06 %; the table at the top
-compares them.
+Both inherit `problem.yaml` and add only what belongs to the discretisation —
+the mesh, the terminal margins and the dynamics penalty — so the two cannot
+drift apart on the physics. Both reach a validated solution at 21 revolutions
+and agree on the elapsed time to 0.06 %; the table at the top compares them.
 
 **Collocation needs more points per arc than shooting needs nodes.** This is the
 one place the two configurations genuinely differ, and it is not arbitrary. At
@@ -190,20 +224,14 @@ end-to-end drift is three orders of magnitude larger. Only re-propagation
 separates the two, which is why `max_propagation_error_nd` is a feasibility
 criterion and not just a diagnostic.
 
-With the mesh right, collocation is much the cheaper method **at the revolution
-count both can solve**: 315 s against 802 s, in 24 iterations against 47,
-despite twice the nodes — roughly five times faster per node per iteration. It
-also converges faster as its mesh is refined, so within its working range there
-is no accuracy-for-time trade to make.
-
-What it cannot do is go further. Shooting validates down to 21 revolutions;
-collocation does not converge below 23, and four separate levers — mesh
-resolution, `hp_segments`, seeding from a verified shooting solution, and
-continuation from its own converged answer — fail to close the gap, the last two
-making it worse. That is the single most important caveat in this example, and
-`FINDINGS.md` section 8 sets out the evidence. **Do not read the 23-revolution
-agreement as meaning the two are interchangeable here:** they agree on the answer
-they can both reach, and disagree on how far the problem can be pushed.
+An earlier version of this example found that collocation could not go below
+23 revolutions, and that mesh resolution, `hp_segments`, seeding from a shooting
+solution and continuation all failed to close the gap. That turned out to be the
+dynamics penalty initialisation, not the method (`FINDINGS.md` section 8): with
+`W.init` set per discretisation, both reach 21. The seeding result has a second
+cause, documented in `algorithms/warm_start.yaml`: a stage seeded from a
+converged solution needs a high starting dynamics penalty, or it walks away
+from the guess.
 
 ### Figures
 
@@ -245,14 +273,17 @@ whole set at once.
 
 | file | role |
 | --- | --- |
-| `config.yaml` | every physical, structural and solver setting worth editing; multiple shooting at 21 revolutions |
-| `config-ps.yaml` | the same problem, pseudospectral; overrides only the mesh, terminal margin and dynamics penalty |
+| `problem.yaml` | every physical and structural setting worth editing: the problem, with no solver settings |
+| `algorithms/` | ways of solving it: single methods and flows; see `algorithms/README.md` |
+| `config.yaml`, `config-ps.yaml` | aliases of `algorithms/ms.yaml` and `algorithms/p.yaml` (results in `results/`, `results-ps/`) |
 | `solar_sail.py` | dynamics, sail steering law, shadow geometry, terminal cones |
 | `problem.py` | expands the settings into the alternating trajopt segments |
-| `search.py` | outer loop over the revolution count (the paper's Algorithm 1) |
+| `algorithm.py` | loads an algorithm file and runs its stages, handing guesses between them |
+| `search.py` | outer loop over the revolution count (the paper's Algorithm 1), for any algorithm |
 | `solution.py` | extraction, independent verification, save/load |
 | `visualization.py` | summary dashboard, 3D still, shadow animation |
-| `main.py` | solve (or search), validate, save, draw |
+| `main.py` | one algorithm: solve (or search), validate, save, draw |
+| `compare.py` | several algorithms on one problem: per-stage table and CSV |
 
 ## Formulation
 

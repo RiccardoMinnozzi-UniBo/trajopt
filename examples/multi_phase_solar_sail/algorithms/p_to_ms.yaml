@@ -1,0 +1,31 @@
+# Flow: Radau p method, then multiple shooting warm-started from its solution.
+#
+#     python main.py algorithms/p_to_ms.yaml
+#
+# Each stage is a complete algorithm file of its own; `initial_guess.from`
+# hands the earlier stage's converged trajectory over phase by phase, and
+# trajopt resamples it onto the new mesh (the Radau polynomials are evaluated
+# at the shooting nodes).  The revolution search and the validation judge the
+# flow by its last stage.  See algorithms/README.md for the schema.
+
+flow:
+  stages:
+    - name: p
+      config: p.yaml
+
+    - name: ms
+      config: ms.yaml
+      initial_guess:
+        from: p
+      method: {inherit: warm_start.yaml}   # see warm_start.yaml
+
+# Variants need no new files.  Inline overrides apply to one stage, e.g. a
+# cheap, coarse collocation pre-solve that is allowed to stop early:
+#
+#   - name: p
+#     config: p.yaml
+#     problem: {sunlit_nodes: 12, eclipse_nodes: 3}
+#     method:  {hyperparams.convergence.iter_max: 30}
+#     allow_nonconverged: true
+#
+# and top-level `problem:` / `method:` blocks apply to every stage.

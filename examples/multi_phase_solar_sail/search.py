@@ -18,6 +18,9 @@ graveyard orbit, so feasibility, once gained, is kept.  A good guess therefore
 costs one extra solve to confirm; a poor guess just costs more steps, which is
 the intended trade.
 
+It runs any algorithm -- one method or a flow of them (see :mod:`algorithm`) --
+and judges each revolution count by the algorithm's final stage.
+
 Only the best attempt's :class:`SolarSailProblem` is kept alive.  Each one owns a
 compiled CVXPY subproblem that can run to gigabytes, so holding on to all of them
 exhausts memory after a handful of solves.
@@ -29,40 +32,52 @@ import gc
 from dataclasses import dataclass
 from pathlib import Path
 
+from algorithm import Algorithm, Run
 from problem import SolarSailProblem
-from solution import SolarSailSolution, extract_solution, validation_report
+from solution import SolarSailSolution
 
 
 @dataclass
 class Attempt:
-    """The outcome of one solve at a fixed revolution count.
+    """The outcome of running the algorithm at a fixed revolution count.
 
     Deliberately holds no reference to the problem: see the module docstring.
     """
 
     revolutions: int
-    solution: SolarSailSolution
-    report: dict
+    run: Run
+
+    @property
+    def solution(self) -> SolarSailSolution | None:
+        return self.run.solution
+
+    @property
+    def report(self) -> dict | None:
+        return self.run.report
 
     @property
     def feasible(self) -> bool:
-        return bool(self.report["numerically_feasible"])
+        return self.run.feasible
 
     @property
     def elapsed_days(self) -> float:
-        return float(self.report["elapsed_days"])
+        return float(self.report["elapsed_days"]) if self.report else float("nan")
 
     def summary(self) -> str:
         mark = "FEASIBLE  " if self.feasible else "infeasible"
+        stages = len(self.run.stages)
+        work = (f"({self.run.iterations:4d} it, {self.run.total_s:5.0f} s"
+                f"{f', {stages} stages' if stages > 1 else ''}"
+                f"{'' if self.run.completed and self.run.final.converged else ', UNCONVERGED'})")
+        if self.report is None:
+            return f"N={self.revolutions:3d}  {mark}  {self.run.final.reason}  {work}"
         # the propagated orbit, not the node values: see validation_report
         offset = self.report["true_final_perigee_km"] - self.solution.geo_radius_km
         return (f"N={self.revolutions:3d}  {mark}  "
                 f"{self.elapsed_days:8.4f} days  "
                 f"e_f={self.report['true_final_eccentricity']:.6f}  "
                 f"true r_p-r_GEO={offset:+8.2f} km  "
-                f"acc={self.report['accumulated_defect_km']:+8.2f} km  "
-                f"({self.report['iterations']:4d} it"
-                f"{'' if self.report['solver_converged'] else ', UNCONVERGED'})")
+                f"acc={self.report['accumulated_defect_km']:+8.2f} km  {work}")
 
 
 @dataclass
@@ -79,28 +94,31 @@ class SearchResult:
         return self.best is not None
 
 
-def solve_once(config_path: str | Path, revolutions: int | None = None,
+def _as_algorithm(algorithm: Algorithm | str | Path) -> Algorithm:
+    return algorithm if isinstance(algorithm, Algorithm) else Algorithm(algorithm)
+
+
+def solve_once(algorithm: Algorithm | str | Path, revolutions: int | None = None,
                overrides: dict | None = None, quiet: bool = False):
-    """Build and solve for one revolution count.
+    """Run the algorithm for one revolution count.
 
-    Returns ``(attempt, problem)``.  Drop the problem as soon as you no longer
-    need it: it owns the compiled subproblem.
+    ``overrides`` is the mapping :meth:`Algorithm.run` takes.  Returns
+    ``(attempt, problem)``, the problem being the final stage's.  Drop it as soon
+    as you no longer need it: it owns the compiled subproblem.
     """
-    settings = dict(overrides or {})
-    if revolutions is not None:
-        settings["revolutions"] = int(revolutions)
-
-    problem = SolarSailProblem(config_path, settings)
-    problem.solve()
-    solution = extract_solution(problem)
-    attempt = Attempt(problem.revolutions, solution, validation_report(solution))
+    run = _as_algorithm(algorithm).run(revolutions, overrides, keep_problem=True)
+    problem, run.problem = run.problem, None
+    attempt = Attempt(run.revolutions, run)
     if not quiet:
         print(f"  {attempt.summary()}", flush=True)
+        if len(run.stages) > 1:
+            for stage in run.stages:
+                print(f"      {stage.summary()}", flush=True)
     return attempt, problem
 
 
 def search_minimum_revolutions(
-    config_path: str | Path,
+    algorithm: Algorithm | str | Path,
     start: int,
     minimum: int = 1,
     maximum: int = 60,
@@ -124,6 +142,7 @@ def search_minimum_revolutions(
     expensive.  Bracketing costs O(log(distance)), so a poor guess is cheap and
     the answer no longer depends on starting near it.
     """
+    algorithm = _as_algorithm(algorithm)
     start = int(min(max(start, minimum), maximum))
     attempts: list[Attempt] = []
     best: Attempt | None = None
@@ -141,7 +160,7 @@ def search_minimum_revolutions(
 
     def evaluate(revolutions: int) -> bool:
         """Solve at this count, keeping the problem only if it is the best yet."""
-        attempt, problem = solve_once(config_path, revolutions, overrides)
+        attempt, problem = solve_once(algorithm, revolutions, overrides)
         attempts.append(attempt)
         if attempt.feasible and (best is None or revolutions < best.revolutions):
             keep(attempt, problem)

@@ -1,0 +1,90 @@
+# Method settings every algorithm shares on THIS problem.
+#
+# Inherited *inside* an algorithm's `method:` block, after the trajopt base
+# configs and before the algorithm's own settings:
+#
+#     method:
+#       inherit:
+#         - trajopt/methods/dev/scp_phases/configs/sqp/autoscvx2.yaml   # SCP flavour
+#         - trajopt/methods/common/configs/discretize/second_order_p.yaml  # discretisation
+#         - method_common.yaml                                          # this file
+#
+# so its keys are method-level (fcns, hyperparams, solver_opts).  Nothing here
+# depends on the discretisation: what does (the mesh, the dynamics penalty
+# initialisation, equal_dt / nsub) is set by each algorithm file.  Keep it that
+# way, or an algorithm will silently pick up another one's settings.
+
+# Read the step tolerance from convergence.eps_state below.  The sqp configs
+# default to init_tolerances_from_dynamics, which ignores eps_state and makes
+# the step tolerance equal to the dynamics eps (~5e-6 for collocation here).
+# That is a bad combination with sqp_autotune: once the iterate is feasible
+# but still drifting, the dynamics weight shrinks (the update does so
+# whenever the buffer is under 1 % of eps), the minimum-time cost can then
+# buy a defect on the final arc, and after iteration 100 the autotune is
+# frozen and cannot undo it.  At 21 revolutions collocation was feasible from
+# iteration ~30, drifted until ~90, then stalled with the final-arc defect
+# 3-18x over tolerance past iteration 110 (FINDINGS.md section 10).  With
+# eps_state the same solve converges at iteration ~50-70.
+fcns:
+  convergence:
+    init_tolerances: trajopt/methods/common/convergence.py:init_tolerances
+
+hyperparams:
+  flags:
+    zoh_dilation: 1
+    quiet:        0
+
+  # Convergence tests two things: that the iteration has stopped moving
+  # (eps_state) and that every constraint buffer is satisfied (each
+  # constraint's own eps).  They answer different questions, so they get
+  # different numbers -- the defect tolerance is set from
+  # problem.max_accumulated_defect_km and is far tighter than is sensible
+  # as a "has the solution settled" threshold.
+  #
+  # iter_max is what an *infeasible* revolution count costs the search, since
+  # those never converge: at 20 revolutions collocation was stationary from
+  # iteration ~50, its final-arc defect pinned at 3x tolerance, and 600 would
+  # have spent another ~35 min confirming it.  Feasible solves converge in
+  # 30-75 iterations, and the penalty autotune freezes at 100 anyway.
+  convergence:
+    eps_state: [1.0e-4]
+    iter_max:  250
+
+  # Virtual buffers (slack) per constraint class.
+  #   vb: none     - hard constraint, the linearised form must hold from the
+  #                  first subproblem.  Only safe when the initial guess
+  #                  already satisfies it.
+  #   vb: standard - slack is added and the penalty autotune drives it to zero
+  #                  over the SCP iterations (the default).
+  # The dynamics penalty is not here: its initialisation is a property of the
+  # discretisation (FINDINGS.md section 8), so each algorithm sets it.
+  penalties:
+    # The initial state is a linear constraint on the first node and the guess
+    # satisfies it exactly, so it needs no slack.  Left buffered, it is the
+    # cheapest place for the optimiser to find the perigee it cannot earn: the
+    # trajectory simply starts above GEO and "reaches" the graveyard for free.
+    initial_state:
+      vb: none
+
+    # The guess is continuous across phases -- the propagated guess is chained
+    # arc by arc, and a guess handed on by an earlier flow stage is a converged
+    # trajectory -- and all three continuity constraints are linear.
+    state_continuity:
+      vb: none
+    time_continuity:
+      vb: none
+    control_continuity:
+      vb: none
+
+    # The arc-end windows are linear in the longitude and the guess sits inside
+    # them, so they can be enforced hard.
+    final_nonconvex_inequality:
+      vb: none
+
+    # The shadow-terminator equality is genuinely nonlinear and the guess only
+    # satisfies it approximately, so it needs slack that the autotune removes.
+    final_nonconvex_equality:
+      vb: standard
+
+solver_opts:
+  solver: CLARABEL    # ships with CVXPY and handles the terminal cones
