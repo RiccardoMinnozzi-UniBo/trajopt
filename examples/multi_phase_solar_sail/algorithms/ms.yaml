@@ -47,10 +47,17 @@ problem:
 
 method:
   # sqp with the second-order trust region: reaches its final accuracy in ~100
-  # iterations where first-order needs thousands.  autoscvx2 is multiple
-  # shooting with the second-order dynamics kernels.
+  # iterations where first-order needs thousands.  autosqp is multiple
+  # shooting with the second-order dynamics kernels and the sqp penalty
+  # autotune (penalties.py:sqp_autotune).
+  #
+  # Not stable/scp_phases/.../autoscvx2.yaml: that flavour uses the
+  # autotune_std penalty update, which on this problem lets the dynamics
+  # weight of near-zero defect components collapse to eps_floor (1e-6) and
+  # grows the others without bound; collocation diverges with it and
+  # shooting lands on a worse optimum (20.18 d against 20.10 d).
   inherit:
-    - trajopt/methods/dev/scp_phases/configs/sqp/autoscvx2.yaml
+    - trajopt/methods/dev/scp_phases/configs/second_order/autosqp.yaml
     - method_common.yaml
 
   hyperparams:
