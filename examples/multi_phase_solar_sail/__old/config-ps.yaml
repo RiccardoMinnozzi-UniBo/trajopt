@@ -1,0 +1,10 @@
+# Multi-phase solar-sail GEO disposal: flipped Legendre-Radau collocation (p).
+#
+# Archived with the initial solutions in this folder: `python main.py
+# __old/config-ps.yaml` reproduces __old/results-ps.  The problem lives in
+# ../problem.yaml, the algorithm in ../algorithms/p.yaml.
+
+inherit: ../algorithms/p.yaml
+
+output:
+  directory: __old/results-ps

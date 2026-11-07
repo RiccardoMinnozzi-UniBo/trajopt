@@ -13,7 +13,7 @@
 # up.  From a cold guess that is what you want.  From a converged one, with
 # collocation's W.init of 1, the first subproblem trades dynamics defect for
 # minimum-time cost and the iteration walks away from the guess -- to a
-# *different, worse* local optimum.  Measured at 3 revolutions (FINDINGS.md
+# *different, worse* local optimum.  Measured at 3 revolutions (../__old/FINDINGS.md
 # section 11), collocation seeded from its own converged solution (p -> p) and
 # from a converged shooting one (ms -> p); a cold start reaches 1.9791 d:
 #

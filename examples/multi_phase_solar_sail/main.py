@@ -5,9 +5,9 @@
 
 ALGORITHM is any algorithm file -- a single method such as ``algorithms/ms.yaml``
 or a flow such as ``algorithms/p_to_ms.yaml`` (see ``algorithms/README.md``) --
-and defaults to ``config-ps.yaml``.  ``config.yaml`` and ``config-ps.yaml`` are
-the original two, kept as aliases of ``algorithms/ms.yaml`` and
-``algorithms/p.yaml``.
+and defaults to ``algorithms/p.yaml``.  The original two configurations,
+``config.yaml`` and ``config-ps.yaml``, are archived in ``__old/`` with the
+initial solutions they produced.
 
 The revolution count cannot be optimised inside a single SCP solve -- it sets the
 number of phases -- so this script searches over it, starting from the guess in
@@ -37,7 +37,7 @@ from solution import (
 from visualization import render_all, render_shadow_animation
 
 EXAMPLE_DIRECTORY = Path(__file__).resolve().parent
-DEFAULT_CONFIG = EXAMPLE_DIRECTORY / "config-ps.yaml"
+DEFAULT_CONFIG = EXAMPLE_DIRECTORY / "algorithms" / "p.yaml"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")

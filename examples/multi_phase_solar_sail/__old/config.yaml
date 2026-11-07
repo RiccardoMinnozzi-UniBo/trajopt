@@ -1,0 +1,10 @@
+# Multi-phase solar-sail GEO disposal: RK4 multiple shooting.
+#
+# Archived with the initial solutions in this folder: `python main.py
+# __old/config.yaml` reproduces __old/results.  The problem lives in
+# ../problem.yaml, the algorithm in ../algorithms/ms.yaml.
+
+inherit: ../algorithms/ms.yaml
+
+output:
+  directory: __old/results

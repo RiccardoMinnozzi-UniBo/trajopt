@@ -45,7 +45,7 @@ problem:
   #
   # Getting both methods here took settings that differ between them: the
   # terminal margins and penalty.dynamics.W.init, both set per algorithm.
-  # FINDINGS.md sections 8 and 10 document what was tried.
+  # __old/FINDINGS.md sections 8 and 10 document what was tried.
   #
   # Why not fewer: the phase chain ends at the last shadow entry, so dropping a
   # revolution removes a whole 2*pi of thrusting rather than a marginal amount.

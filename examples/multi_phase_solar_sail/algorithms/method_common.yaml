@@ -23,7 +23,7 @@
 # buy a defect on the final arc, and after iteration 100 the autotune is
 # frozen and cannot undo it.  At 21 revolutions collocation was feasible from
 # iteration ~30, drifted until ~90, then stalled with the final-arc defect
-# 3-18x over tolerance past iteration 110 (FINDINGS.md section 10).  With
+# 3-18x over tolerance past iteration 110 (../__old/FINDINGS.md section 10).  With
 # eps_state the same solve converges at iteration ~50-70.
 fcns:
   convergence:
@@ -57,7 +57,7 @@ hyperparams:
   #   vb: standard - slack is added and the penalty autotune drives it to zero
   #                  over the SCP iterations (the default).
   # The dynamics penalty is not here: its initialisation is a property of the
-  # discretisation (FINDINGS.md section 8), so each algorithm sets it.
+  # discretisation (../__old/FINDINGS.md section 8), so each algorithm sets it.
   penalties:
     # The initial state is a linear constraint on the first node and the guess
     # satisfies it exactly, so it needs no slack.  Left buffered, it is the

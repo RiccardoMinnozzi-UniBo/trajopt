@@ -20,8 +20,8 @@ python compare.py algorithms/ms.yaml algorithms/p.yaml algorithms/p_to_ms.yaml -
 | `method_common.yaml` | method settings every algorithm shares on this problem (buffers, convergence, conic solver) |
 | `warm_start.yaml` | method settings for a stage seeded by an earlier one — **use it on every seeded stage** |
 
-`../config.yaml` and `../config-ps.yaml` are aliases of `ms.yaml` and `p.yaml`,
-kept so that existing commands and references still work.
+`../__old/config.yaml` and `../__old/config-ps.yaml` are aliases of `ms.yaml` and `p.yaml`
+that reproduce the initial solutions archived in `../__old/`.
 
 ## A single-method algorithm
 
@@ -60,8 +60,8 @@ The settings that have mattered most on this problem, all per algorithm:
 | setting | why |
 | --- | --- |
 | mesh | collocation needs ~2x the nodes of shooting before its *re-propagated* trajectory is accurate; judge it by `max re-propagation error`, not the collocation residual |
-| `penalties.dynamics.W.init` | 100 for shooting, 1 for collocation; the wrong value costs two revolutions and looks like a structural floor (FINDINGS.md §8) |
-| terminal margins | minimum time parks the nodal state on the cones; the propagated orbit then misses by the discretisation error (FINDINGS.md §10) |
+| `penalties.dynamics.W.init` | 100 for shooting, 1 for collocation; the wrong value costs two revolutions and looks like a structural floor (../__old/FINDINGS.md §8) |
+| terminal margins | minimum time parks the nodal state on the cones; the propagated orbit then misses by the discretisation error (../__old/FINDINGS.md §10) |
 
 ## A flow
 
@@ -150,7 +150,7 @@ since it holds the compiled problem.
 
 ## Costs to plan around
 
-Measured at 21 revolutions on a 64 GB machine (FINDINGS.md §10):
+Measured at 21 revolutions on a 64 GB machine (../__old/FINDINGS.md §10):
 
 * Every stage pays its own setup: shooting spends ~5.5 min compiling JAX kernels
   (once per phase), collocation ~1 min. A flow stage costs this again even when
