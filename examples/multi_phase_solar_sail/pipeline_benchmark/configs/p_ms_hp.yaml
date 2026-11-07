@@ -1,0 +1,47 @@
+# Flow: p -> ms -> hp, each stage warm-started from the one before.
+#
+# Every stage stops on the same kind of test (flag_conv 2: change in cost
+# below eps_cost AND nonlinear feasibility).  The ladder is on the cost test
+# only:
+#
+#   stage   eps_cost        dynamics tolerance
+#   p       100 x desired   final (problem.yaml: 3 km budget)
+#   ms       10 x desired   final
+#   hp            desired   final
+#
+# The dynamics tolerance is the same in every stage.  Loosening it for p (a
+# 10x budget was tried) backfires: the sqp penalty autotune grows the dynamics
+# weight relative to that tolerance, so a looser one leaves the weight pinned
+# at its 1e7 cap with the defect stalled at ~5x tolerance, on a worse optimum
+# (20.23 d against 20.11 d), and the stage runs to the iteration cap.
+#
+# p and ms hand on their iterate even if they stop on the iteration cap, so a
+# stage that never meets its test does not by itself end the flow.
+
+method:
+  hyperparams:
+    convergence:
+      flag_conv: 2
+
+flow:
+  stages:
+    - name: p
+      config: ../../algorithms/p.yaml
+      allow_nonconverged: true
+      method:
+        hyperparams: {convergence: {eps_cost: 1.0e-2}}
+
+    - name: ms
+      config: ../../algorithms/ms.yaml
+      initial_guess: {from: p}
+      allow_nonconverged: true
+      method:
+        inherit: ../../algorithms/warm_start.yaml
+        hyperparams: {convergence: {eps_cost: 1.0e-3}}
+
+    - name: hp
+      config: ../../algorithms/hp.yaml
+      initial_guess: {from: ms}
+      method:
+        inherit: ../../algorithms/warm_start.yaml
+        hyperparams: {convergence: {eps_cost: 1.0e-4}}

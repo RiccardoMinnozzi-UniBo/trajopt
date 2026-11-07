@@ -1,0 +1,15 @@
+# Single method: flipped Legendre-Radau collocation (p), solved to the final
+# accuracy.  Same mesh and method as ../../algorithms/p.yaml; only the
+# convergence test is the one every approach of this benchmark ends with.
+#
+# flag_conv 2: converged when the change in cost is below eps_cost AND the
+# trajectory is feasible on the *nonlinear* constraints (true defect within the
+# dynamics tolerance, nonconvex constraints evaluated on the iterate).
+
+inherit: ../../algorithms/p.yaml
+
+method:
+  hyperparams:
+    convergence:
+      flag_conv: 2
+      eps_cost:  1.0e-4      # the desired value (trajopt's default)

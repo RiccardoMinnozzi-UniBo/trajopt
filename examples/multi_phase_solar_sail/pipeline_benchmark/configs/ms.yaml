@@ -1,0 +1,11 @@
+# Single method: RK4 multiple shooting, solved to the final accuracy.  Same
+# mesh and method as ../../algorithms/ms.yaml; only the convergence test is the
+# one every approach of this benchmark ends with (see p.yaml).
+
+inherit: ../../algorithms/ms.yaml
+
+method:
+  hyperparams:
+    convergence:
+      flag_conv: 2
+      eps_cost:  1.0e-4      # the desired value (trajopt's default)
