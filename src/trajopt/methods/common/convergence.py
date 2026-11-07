@@ -41,8 +41,9 @@ def check_convergence_tolerance(subproblem) -> None:
 
     defect              = current_iter_data.get("defect", 0)
     bool_ncvx_dyn_state = np.all(np.abs(defect) <= subproblem.eps_dyn)
+    # inequalities are g <= 0: only the positive part is a violation
     bool_ncvx_ineq      = all(
-        np.all(np.abs(h.g_nl) <= np.atleast_1d(h.penalties.eps))
+        np.all(np.maximum(h.g_nl, 0.0) <= np.atleast_1d(h.penalties.eps))
         for h in constraints
         if "nonconvex_inequality" in h.type and getattr(h, "g_nl", None) is not None
     )
