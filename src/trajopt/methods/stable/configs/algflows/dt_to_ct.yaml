@@ -1,0 +1,9 @@
+# Stage files come from the current example directory when loaded by library path.
+flow:
+  stages:
+    - name: nodal
+      config: stages/ms.yaml
+    - name: ctcs
+      config: stages/ctcs.yaml
+      initial_guess:
+        from: nodal

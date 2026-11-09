@@ -1,0 +1,9 @@
+# Stage files come from the current example directory when loaded by library path.
+flow:
+  stages:
+    - name: p_method
+      config: stages/p_method.yaml
+    - name: shooting
+      config: stages/ms.yaml
+      initial_guess:
+        from: p_method

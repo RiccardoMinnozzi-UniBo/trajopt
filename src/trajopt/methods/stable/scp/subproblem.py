@@ -1,0 +1,400 @@
+import copy
+import time
+
+import numpy as np
+import cvxpy as cp
+
+from trajopt.methods.common import penalties
+from trajopt.methods.common.initial_guess import prepare_initial_guess
+from trajopt.methods.common.discretize import make_mesh
+from trajopt.methods.common.utils.solverstate import PhaseState
+import trajopt.methods.stable.scp.constraint_types as scp_constraint_type_module
+import trajopt.methods.stable.scp.cost_types as scp_cost_type_module
+from trajopt.common.tools import AttrDict, recursive_attrdict, resolve_function_from_string
+
+
+def _resolve_fcns_tree(node):
+    # resolves 'path.py:func' leaves to callables at any nesting depth, e.g. default/<phase_name>
+    if isinstance(node, str):
+        return resolve_function_from_string(node)
+    if node is None:
+        return None
+    return AttrDict({name: _resolve_fcns_tree(value) for name, value in node.items()})
+
+
+class Subproblem():
+    """Numerical variables, constraints, and iteration state for one physical phase."""
+
+    constraint_type_module = scp_constraint_type_module
+    cost_type_module       = scp_cost_type_module
+
+    @property
+    def current_iter_data(self):
+        return self.state.current
+
+    @current_iter_data.setter
+    def current_iter_data(self, value):
+        self.state.current = value
+
+    @property
+    def iter_data_list(self):
+        return self.state.history
+
+    @iter_data_list.setter
+    def iter_data_list(self, value):
+        self.state.history = value
+
+    @property
+    def s_mult(self):
+        return self.state.s_mult
+
+    @s_mult.setter
+    def s_mult(self, value):
+        self.state.s_mult = float(value)
+
+    def __init__(self, problem, method_config: AttrDict, *, initial_guess=None, previous_guess=None) -> None:
+        self.state = PhaseState()
+        self.name           = problem.name
+        self.problem        = problem
+        self.method_config  = method_config
+        self.index_map      = problem.index_map
+        self.nondim         = problem.nondim
+        self.params         = problem.params
+
+        # Numerical recipes pair module hyperparameters with their configured functions.
+        method_hyperparams = method_config.get('hyperparams', AttrDict())
+        method_fcns        = method_config.get('fcns', AttrDict())
+
+        self.hyperparams = AttrDict()
+        self.fcns        = AttrDict()
+        for module_name in set(method_hyperparams) | set(method_fcns):
+            self.hyperparams[module_name] = method_hyperparams.get(module_name, AttrDict())
+            self.fcns[module_name] = _resolve_fcns_tree(method_fcns.get(module_name, AttrDict()))
+
+        self._trust_region_penalty_fcn = self.fcns.trust_region.penalty
+        self._convergence_check_fcn    = self.fcns.convergence.check
+
+        # Dictionary of constraints for this subproblem
+        self.constraints = AttrDict()
+        for cnstr_name, constraint in problem.constraints.items():
+            scp_class_name = f"scp_{constraint.type}"
+            constraintClass = getattr(self.constraint_type_module, scp_class_name)
+            self.constraints[cnstr_name] = constraintClass(constraint, self)
+
+        # Dictionary of cost types for this subproblem
+        self.costs = AttrDict()
+        for cost_name, cost in problem.costs.items():
+            scp_class_name = f"scp_{cost.type}"
+            costClass = getattr(self.cost_type_module, scp_class_name)
+            self.costs[cost_name] = costClass(cost, self)
+
+        self.free_final_time = self.derive_free_final_time()
+
+        self.mesh = make_mesh(self.index_map.N.all, self.hyperparams.discretize, self.fcns.discretize, segments=problem.hp_segments)
+        self.initialize(initial_guess, previous_guess)
+
+        self.cp_params            = AttrDict()
+        self.cp_vars              = AttrDict()
+        self.cp_constraints       = []
+        self.cp_cost              = 0
+        self.cp_subproblem_status = None
+        self.s_mult               = 1.0
+
+        self.create_cvxpy_parameters()
+        self.create_cvxpy_variables()
+        self.create_cvxpy_constraints()
+        self.create_cvxpy_cost()
+
+    def find_constraint(self, cnstr_type):
+        """This subproblem's constraint of the given type, or None."""
+        return next((c.constraint for c in self.constraints.values() if c.type == cnstr_type), None)
+
+    def penalty_snapshot(self) -> AttrDict:
+        """Per-constraint penalty state, keyed by field then constraint name.
+
+        Field names come from each constraint's own hyperparams.penalties block
+        (Penalties.names), not an assumed list -- a constraint penalized through
+        some other named weight is picked up automatically.
+        """
+        snapshot = AttrDict()
+        for constraint in self.constraints.values():
+            if constraint.shape is None:
+                continue
+            parts = constraint.penalties.get('parts')
+            if parts is not None:
+                for name, p in parts.items():
+                    self._snapshot_penalty(snapshot, f"{constraint.name}_{name}", p)
+            else:
+                self._snapshot_penalty(snapshot, constraint.name, constraint.penalties)
+        return snapshot
+
+    @staticmethod
+    def _snapshot_penalty(snapshot, cname, p) -> None:
+        fields = ["vb"] + list(p.names)
+        if p.vb_type in ("split", "sparse"):
+            fields += [f"{name}_p" for name in p.names] + [f"{name}_m" for name in p.names]
+        for field in fields:
+            snapshot.setdefault(field, AttrDict())[cname] = getattr(p, field)
+
+    def derive_free_final_time(self) -> bool:
+        """False only when initial_time and a fixed final_time pin both ends."""
+        initial = self.find_constraint("initial_time")
+        final   = self.find_constraint("final_time")
+        self._validate_time_config(initial, final)
+        return not (initial is not None and final is not None and final.is_fixed)
+
+    def _validate_time_config(self, initial, final) -> None:
+        """Reject an independently fixed epoch on an inherited-time phase."""
+        if initial is not None and self.inherits_start_epoch():
+            raise ValueError(
+                f"phase '{self.name}' declares both initial_time and time continuity; "
+                "its start epoch comes from the preceding phase, so drop the initial_time"
+            )
+
+    def inherits_start_epoch(self) -> bool:
+        return any(self.find_constraint(kind) is not None
+                   for kind in ("time_continuity", "full_continuity"))
+
+    def _anchor_start_time(self) -> bool:
+        """Whether this subproblem's own t=0 should be pinned via dt[0,0]==0.
+
+        Explicit time couplings let the epoch float with the source phase.
+        """
+        return not self.inherits_start_epoch()
+
+    def initialize(self, supplied=None, previous=None) -> None:
+        self.initial_guess = AttrDict()
+
+        for constraint in self.constraints.values():
+            constraint.compile(self)
+            constraint.init_penalty(self)
+
+        dyn = next((c for c in self.constraints.values() if c.type == "dynamics"), None)
+        self.eps_dyn   = dyn.penalties.eps.copy() if dyn is not None else np.full(self.index_map.n.z, 1e-4)
+        self.eps_dyn[self.index_map.indices.z.running_cost] = np.inf
+
+        self.fcns.convergence.init_tolerances(self)
+
+        self.initial_guess = prepare_initial_guess(
+            self, supplied, previous)
+        self.Ts_init = self.initial_guess.t[-1] - self.initial_guess.t[0]
+        self.cost_init = self.cost_type_module.compute_nonconvex_terminal_costs(
+            self.initial_guess.z, self.initial_guess.nu, self.problem, self)
+        self._reset_iter_data()
+
+    def _reset_iter_data(self):
+        self.iter_data_list = []
+        self.state.scalar_trace = []
+
+        self.current_iter_data = recursive_attrdict({
+            "iter_num": 0,
+            "z_opt": self.initial_guess.z,
+            "nu_opt": self.initial_guess.nu,
+            "t_start": float(self.initial_guess.t[0]) * self.nondim.time_scale,
+            "t_final": float(self.initial_guess.t[-1]) * self.nondim.time_scale,
+            "cost": 0.0,
+            "penalty_cost": 0.0,
+            **self.penalty_snapshot(),
+        })
+
+        self.iter_data_list.append(copy.deepcopy(self.current_iter_data))
+
+    def install_initial_guess(self, prepared):
+        """Reset numerical state, preserving compiled kernels and the CVXPY problem."""
+        self.initial_guess = prepared
+        self.Ts_init = prepared.t[-1] - prepared.t[0]
+        self.cost_init = self.cost_type_module.compute_nonconvex_terminal_costs(
+            prepared.z, prepared.nu, self.problem, self)
+        for constraint in self.constraints.values():
+            penalties.reset_penalty_values(constraint.penalties)
+            if hasattr(constraint, 'lagrangian_dual'):
+                constraint.lagrangian_dual.fill(0.)
+            constraint.__dict__.pop('g_nl', None)
+        reset = self.fcns.trust_region.get('reset')
+        if reset is not None:
+            reset(self)
+        self.s_mult = 1.0
+        self.cp_subproblem_status = None
+        self._dz_new = self._dnu_new = None
+        self._reset_iter_data()
+
+    def prepare_guess(self, supplied=None, previous=None):
+        return prepare_initial_guess(self, supplied, previous)
+
+    def create_cvxpy_parameters(self) -> None:
+        N       = self.index_map.N.all
+        n_z     = self.index_map.n.z
+        n_nu    = self.index_map.n.nu
+
+        self.cp_params.z_ref  = cp.Parameter((N, n_z),  name="z_ref")
+        self.cp_params.nu_ref = cp.Parameter((N, n_nu), name="nu_ref")
+
+        self.x_ref, self.t_ref, self.beta_ref, self.u_ref, self.s_ref = self.index_map.unpack_znu(self.cp_params.z_ref, self.cp_params.nu_ref)
+
+        self.fcns.trust_region.create_params(self)
+
+        self.cp_params.dcostdx = cp.Parameter((N, n_z),  name="dcostdx")
+        self.cp_params.dcostdu = cp.Parameter((N, n_nu), name="dcostdu")
+        self.cp_params.cost0   = cp.Parameter((N,),      name="cost0")
+
+        self.fcns.discretize.create_time_params(self)
+
+        for constraint in self.constraints.values():
+            constraint.create_penalty_parameters(self)
+            constraint.create_cvxpy_parameters(self)
+
+    def create_cvxpy_variables(self) -> None:
+        N, n_x, n_t, n_u = self.index_map.N.all, self.index_map.n.state, self.index_map.n.time, self.index_map.n.control
+        n_ctcs = self.index_map.n.ctcs
+        n_rc   = self.index_map.n.running_cost
+
+        self.cp_vars.dx     = cp.Variable((N, n_x),    name="dx")
+        self.cp_vars.dbeta  = cp.Variable((N, n_ctcs), name="dbeta")  if n_ctcs > 0 else None
+        self.cp_vars.dgamma = cp.Variable((N, n_rc),   name="dgamma") if n_rc   > 0 else None
+        self.cp_vars.du     = cp.Variable((N, n_u),    name="du")
+
+        if self.free_final_time:
+            self.cp_vars.dt = cp.Variable((N, n_t), name="dt")
+            self.cp_vars.ds = cp.Variable((N, 1),   name="ds")
+        else:
+            self.cp_vars.dt = cp.Constant(np.zeros((N, n_t)))
+            self.cp_vars.ds = cp.Constant(np.zeros((N, 1)))
+
+        dz_components = [self.cp_vars.dx, self.cp_vars.dt]
+
+        if n_ctcs > 0:
+            dz_components.append(self.cp_vars.dbeta)
+        if n_rc > 0:
+            dz_components.append(self.cp_vars.dgamma)
+
+        self.dz  = cp.hstack(dz_components)
+        self.dnu = cp.hstack([self.cp_vars.du, self.cp_vars.ds])
+        self.dt  = self.cp_vars.dt
+        self.ds  = self.cp_vars.ds
+
+        for constraint in self.constraints.values():
+            constraint.create_penalty_variables(self)
+            constraint.create_cvxpy_variables(self)
+
+    def create_cvxpy_constraints(self) -> None:
+        for constraint in self.constraints.values():
+            constraint.create_cvxpy_constraints(self)
+            extra_constraint_fcn = constraint.fcns.get('constraints') if constraint.fcns else None
+            if extra_constraint_fcn is not None:
+                extra_constraint_fcn(constraint, self)
+
+        if self.free_final_time:
+            self.create_free_final_time_constraints()
+
+    def create_cvxpy_cost(self) -> None:
+        for cost in self.costs.values():
+            cost.create_cvxpy_cost(self)
+
+        self._trust_region_penalty_fcn(self)
+
+        for constraint in self.constraints.values():
+            constraint.add_penalty_cost(self)
+
+    def create_free_final_time_constraints(self) -> None:
+        if self._anchor_start_time():
+            self.cp_constraints.append(self.dt[0, 0] == 0)
+
+        self.fcns.discretize.create_time_constraints(self)
+
+    def update_cvxpy_parameters(self) -> None:
+        z_opt  = self.current_iter_data.z_opt
+        nu_opt = self.current_iter_data.nu_opt
+
+        self.cp_params.z_ref.value  = z_opt
+        self.cp_params.nu_ref.value = nu_opt
+
+        self.x_ref, self.t_ref, self.beta_ref, self.u_ref, self.s_ref = self.index_map.unpack_znu(z_opt, nu_opt)
+
+        self.fcns.discretize.update_time_params(self)
+
+        disc_start_time = time.perf_counter()
+
+        for constraint in self.constraints.values():
+            constraint.update_cvxpy_parameters(self)
+
+        for cost in self.costs.values():
+            cost.update_cvxpy_parameters(self)
+
+        disc_end_time = time.perf_counter()
+
+        self.current_iter_data.discretization_time = (disc_end_time - disc_start_time) * 1000
+
+        self.fcns.trust_region.update_params(self)
+
+        for constraint in self.constraints.values():
+            constraint.update_penalty_parameters(self)
+
+    def apply_step(self, alpha: float = 1.0) -> None:
+        """Install the scaled primal step; evaluation and autotuning are explicit stages."""
+        dz_new  = self._dz_new
+        dnu_new = self._dnu_new
+
+        self.current_iter_data.dz    = alpha * dz_new
+        self.current_iter_data.dnu   = alpha * dnu_new
+        self.current_iter_data.alpha = alpha
+
+        z_new  = self.current_iter_data.z_opt  + alpha * dz_new
+        nu_new = self.current_iter_data.nu_opt + alpha * dnu_new
+
+        self.current_iter_data.z_opt  = z_new
+        self.current_iter_data.nu_opt = nu_new
+
+        x_opt_new, t_opt_new, beta_opt_new, u_opt_new, s_opt_new = self.index_map.unpack_znu(z_new, nu_new)
+
+        t_start_new = float(np.asarray(t_opt_new[0]).ravel()[0])
+        t_final_new = float(np.asarray(t_opt_new[-1]).ravel()[0])
+
+        self.current_iter_data.x_opt    = x_opt_new
+        self.current_iter_data.t_opt    = t_opt_new
+        self.current_iter_data.t_start  = t_start_new * self.nondim.time_scale
+        self.current_iter_data.t_final  = t_final_new * self.nondim.time_scale
+        self.current_iter_data.beta_opt = beta_opt_new
+        self.current_iter_data.u_opt    = u_opt_new
+        self.current_iter_data.s_opt    = s_opt_new
+
+    def evaluate_step(self) -> None:
+        """Read buffers and evaluate the accepted trajectory with the current weights."""
+        for constraint in self.constraints.values():
+            constraint.read_vb(self)
+
+        self.current_iter_data.cost, self.current_iter_data.penalty_cost = self.fcns.trust_region.evaluate_step(self)
+
+        for constraint in self.constraints.values():
+            constraint.update_current_iter_data(self)
+
+        self.current_iter_data.iter_num += 1
+
+        self.current_iter_data.update(self.penalty_snapshot())
+
+    def check_convergence(self) -> None:
+        """Test phase stopping criteria before updating penalty weights."""
+        self._convergence_check_fcn(self)
+
+    def record_iter_data(self) -> None:
+        self.iter_data_list.append(copy.deepcopy(self.current_iter_data))
+        retention = self.method_config.get('history', 'scalars')
+        if retention not in {'none', 'scalars', 'full'}:
+            raise ValueError('history must be none, scalars, or full')
+        if retention != 'none':
+            fields = ('iter_num', 'cost', 'penalty_cost', 'alpha', 'chk', 'converged',
+                      't_start', 't_final', 'discretization_time', 'parse_time', 'solve_time',
+                      'tr_ratio', 's_mult')
+            self.state.scalar_trace.append(copy.deepcopy({key: self.current_iter_data[key]
+                for key in fields if key in self.current_iter_data}))
+        if retention != 'full' and len(self.iter_data_list) > 3:
+            # The second-order proximal update needs two previous references.
+            self.iter_data_list[:] = [self.iter_data_list[0], *self.iter_data_list[-2:]]
+
+    def update_trust_region(self) -> None:
+        autotune = self.fcns.trust_region.get('autotune')
+        if autotune is not None:
+            autotune(self)
+
+    def update_constraint_penalties(self) -> None:
+        for constraint in self.constraints.values():
+            constraint.update_constraint_penalties(self)

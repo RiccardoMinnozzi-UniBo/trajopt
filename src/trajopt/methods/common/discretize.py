@@ -1,9 +1,39 @@
+"""Construct meshes and discretize trajectory dynamics and controls."""
+from dataclasses import dataclass
+
 import cvxpy as cp
 import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy as sp
 
+
+@dataclass(frozen=True)
+class Mesh:
+    tau: np.ndarray
+    discretize: str
+    differentiation: np.ndarray | None = None
+    weights: np.ndarray | None = None  # quadrature weights on [0, 1] at the collocation nodes tau[1:]
+    segments: int = 1  # hp segments of equal order; knots at node indices h * (N-1) / segments
+
+
+def make_mesh(num_nodes, options, fcns=None, segments=1):
+    if num_nodes < 2:
+        raise ValueError('A trajectory mesh needs at least two nodes')
+    kind = getattr(options, 'mode', 'ms')
+    if kind == 'ms':
+        return Mesh(np.linspace(0, 1, num_nodes), kind)
+    if kind != 'ps':
+        raise ValueError(f'Unknown discretization {kind!r}')
+    if int(segments) != segments or segments < 1 or (num_nodes-1) % segments:
+        raise ValueError(f"hp_segments={segments} must be a positive integer "
+                         f"dividing num_nodes - 1 = {num_nodes - 1}")
+    segments = int(segments)
+    operator = fcns.differential_operator if fcns is not None else flipped_radau_hp_operator
+    _, nodes, w, D = operator(num_nodes-1, segments)
+    tau = (nodes + 1) / 2
+    tau[0], tau[-1] = 0., 1.
+    return Mesh(tau, kind, D, w / 2, segments)
 
 
 # =============================================================================
@@ -394,24 +424,6 @@ def dynamics_update_cvxpy_parameters_second_order_ms(constraint, subproblem):
     constraint.H_z_k, constraint.H_nu_k, constraint.H_nu_kp = constraint.cnstr_hessians(
         ks, lam_refs, z_ref_ks, nu_ref_ks, nu_ref_kps, subproblem.params,
     )
-
-
-# ---------------------------------------------------------------------------
-# control interpolation
-# ---------------------------------------------------------------------------
-
-def interpolate_control_foh(tau_nodes, nu_nodes):
-    """Returns a JAX nu(z, tau) interpolator, linear between nodes."""
-    tau_ref = jnp.asarray(tau_nodes)
-    nu_ref  = jnp.asarray(nu_nodes)
-    N_nodes = tau_ref.shape[0]
-
-    def nu_interp(z, tau):
-        k = jnp.clip(jnp.searchsorted(tau_ref, tau, side='right') - 1, 0, N_nodes - 2)
-        a = (tau - tau_ref[k]) / (tau_ref[k + 1] - tau_ref[k])
-        return (1 - a) * nu_ref[k] + a * nu_ref[k + 1]
-
-    return nu_interp
 
 
 # ---------------------------------------------------------------------------
@@ -929,31 +941,3 @@ def flipped_radau_hp_operator(N_col: int, H: int) -> tuple[np.ndarray, np.ndarra
         D[h * p:(h + 1) * p, h * p:(h + 1) * p + 1] = H * D_local
 
     return etau[1:], etau, w, D
-
-
-# ---------------------------------------------------------------------
-# Lagrange interpolation (Eq. 9, CEAS2017)
-# ---------------------------------------------------------------------
-
-def lagrange_basis(eval_points: np.ndarray, nodes: np.ndarray) -> np.ndarray:
-    """Compute Lagrange basis polynomials P_i(t) evaluated at eval_points."""
-    t = np.asarray(eval_points, dtype=float)
-    ti = np.asarray(nodes, dtype=float)
-
-    m_eval = len(t)
-    n_nodes = len(ti)
-
-    P = np.ones((m_eval, n_nodes))
-
-    for i in range(n_nodes):
-        for k in range(n_nodes):
-            if k != i:
-                P[:, i] *= (t - ti[k]) / (ti[i] - ti[k])
-
-    return P
-
-
-def lagrange_interpolate(eval_points: np.ndarray, nodes: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """Evaluate interpolating polynomial."""
-    P = lagrange_basis(eval_points, nodes)
-    return P @ values

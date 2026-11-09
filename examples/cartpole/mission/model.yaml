@@ -1,0 +1,48 @@
+inherit: trajopt/models/cartpole/cartpole.yaml
+
+# source: https://underactuated.mit.edu/acrobot.html#cart_pole
+
+fcns:
+  u_squared_cost: cartpole.py:u_squared_cost
+  state_pos:      cartpole.py:state_pos
+  state_vel:      cartpole.py:state_vel
+  cart_pos:       cartpole.py:cart_pos
+  pole_dir:       cartpole.py:pole_dir
+
+outputs:
+  position:
+    type: time_series
+    fcn: fcns.state_pos
+    group: state
+    title: "Position vs Time"
+    xlabel: "Time (s)"
+    ylabel: "Position"
+
+  velocity:
+    type: time_series
+    fcn: fcns.state_vel
+    group: state
+    title: "Velocity vs Time"
+    xlabel: "Time (s)"
+    ylabel: "Velocity"
+
+  control:
+    type: time_series
+    component: fx1
+    group: control
+    title: "Force vs Time"
+    xlabel: "Time (s)"
+    ylabel: "Force (N)"
+
+  cartpole:
+    type: spatial
+    fcn: fcns.cart_pos
+    equal_aspect: true
+    quivers:
+      body:
+        fcn: fcns.pole_dir
+        scale: 0.2
+        color: [0, 0, 0]
+        alpha: 0.8
+        linewidth: 2.0
+        centered: false

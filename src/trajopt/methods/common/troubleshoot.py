@@ -3,6 +3,13 @@ import numpy as np
 from trajopt.methods.common import trust_region
 
 
+def read_recovery_settings(config, overrides):
+    """Read the callbacks used after a failed solve or an unusable trial."""
+    recovery = config.get("fcns", {}).get("troubleshoot", {}) or {}
+    return {name: overrides.get(name, recovery.get(name))
+            for name in ("on_error", "on_step")}
+
+
 def tighten_on_error(subproblems, exc=None) -> str:
     # tighten the trust region in response to a failed solve, returning a status message
     subproblems = list(subproblems)
@@ -23,7 +30,7 @@ def adjust_on_step(subproblems) -> tuple[bool, str | None]:
 
 
 def adapt_trust_region_on_step(subproblems) -> tuple[bool, str | None]:
-    """Ratio test between the nonlinear and linearized decrease."""
+    """Accept or reject the step using the actual to predicted decrease ratio."""
     subproblems = list(subproblems)
     cfg = subproblems[0].hyperparams.trust_region.adaptive
     if not trust_region.step_is_usable(subproblems):
