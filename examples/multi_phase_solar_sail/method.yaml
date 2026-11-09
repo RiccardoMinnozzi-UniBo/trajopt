@@ -1,0 +1,36 @@
+inherit: trajopt/methods/dev/configs/second_order/autosqp.yaml
+
+fcns:
+  convergence:
+    init_tolerances: trajopt/methods/common/convergence.py:init_tolerances
+
+hyperparams:
+  flags:
+    zoh_dilation: 1
+    quiet: 0
+
+  discretize:
+    equal_dt: 1
+    nsub: 6
+
+  convergence:
+    flag_conv: 2
+    eps_cost: 1.0e-4
+    eps_state: [1.0e-4]
+    iter_max: 250
+
+  penalties:
+    dynamics:
+      W:
+        penalty: true
+        autotune: true
+        init: 100.0
+    initial_state:      {vb: none}
+    state_continuity:   {vb: none}
+    time_continuity:    {vb: none}
+    control_continuity: {vb: none}
+    final_nonconvex_inequality: {vb: none}
+    final_nonconvex_equality:   {vb: standard}
+
+solver_opts:
+  solver: CLARABEL

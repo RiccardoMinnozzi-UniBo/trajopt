@@ -1,0 +1,19 @@
+inherit: common_arc.yaml
+
+params:
+  illumination: 1.0
+
+constraints:
+  final_eccentricity:
+    type: final_convex_inequality
+    fcn: fcns.terminal_eccentricity_cone
+
+  final_perigee:
+    type: final_convex_inequality
+    fcn: fcns.terminal_perigee_cone
+
+costs:
+  minimum_elapsed_time:
+    type: final_state
+    idx: 5
+    w: 1.0

@@ -1,0 +1,18 @@
+inherit:
+  - ms.yaml
+  - mesh_p.yaml
+trajectory:
+  phases:
+    final_arc:
+      params:
+        perigee_margin_km:   0.1
+        eccentricity_margin: 5.0e-6
+method:
+  inherit: trajopt/methods/common/configs/discretize/second_order_p.yaml
+  hyperparams:
+    convergence:
+      eps_cost: 1.0e-2
+    penalties:
+      dynamics:
+        W:
+          init: 1.0

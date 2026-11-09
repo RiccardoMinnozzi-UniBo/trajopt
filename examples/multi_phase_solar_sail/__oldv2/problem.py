@@ -50,10 +50,13 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from trajopt.flows.transfer import phase_layouts, transfer_guesses
-from trajopt.utils import config_loader
-from trajopt.utils import tools
-from trajopt.utils.tools import AttrDict, recursive_attrdict
+from trajopt.formulations.stable.specs import normalize
+from trajopt.methods.common.utils.trajectory_conversion import phase_layout
+from trajopt.methods.stable.algflows.transfer import transfer_guesses
+from trajopt.methods.stable.scp.scp_method import SCPMethod
+from trajopt.common import config_reader as config_loader
+from trajopt.common import tools
+from trajopt.common.tools import AttrDict, recursive_attrdict
 
 _SOURCE = str(Path(__file__).with_name("solar_sail.py").resolve())
 # The first state is p - r_GEO, not p: see solar_sail.py's module docstring.
@@ -606,18 +609,16 @@ class SolarSailProblem:
             )
 
         self.config.trajectory = build_trajectory_config(self.settings)
-        trajectory_class = config_loader.resolve_formulation_trajectory_class(self.config.method)
-        self.trajectory = trajectory_class(self.config.trajectory)
+        self.problem_spec, method_spec = normalize(
+            {"trajectory": self.config.trajectory, "method": self.config.method})
         if initial_guess is not None and guess_layouts is not None:
             # trajopt's own flow check: same phase names, channels and units
             source = SimpleNamespace(name="initial_guess", trajectory=initial_guess,
                                      layouts=guess_layouts)
             initial_guess = transfer_guesses(source, self.phase_layouts())
-        method_class = config_loader.resolve_scp_method_class(self.config.method)
-        self.method = method_class(
-            self.config.method, self.trajectory,
-            **({} if initial_guess is None else {"initial_guess": initial_guess}),
-        )
+        self.method = SCPMethod(problem=self.problem_spec, method=method_spec,
+                                initial_guess=initial_guess)
+        self.result = None
 
     @property
     def revolutions(self) -> int:
@@ -626,23 +627,28 @@ class SolarSailProblem:
     @property
     def segments(self):
         """The solved phases (trajopt subproblems), in chain order."""
-        return self.method.scp_trajectory.scp_phases
+        return self.method.phases
+
+    @property
+    def converged(self) -> bool:
+        return bool(self.method.state.converged)
 
     def solve(self) -> bool:
         """Run SCP until convergence or the iteration budget is exhausted."""
-        self.method.solve()
-        return bool(self.method._converged)
+        self.result = self.method.solve()
+        return self.converged
 
     def export_guess(self) -> dict:
-        """The current iterate as ``{phase name: Guess}``, mesh-independent.
+        """The current iterate as ``{phase name: Trajectory}``, mesh-independent.
 
         Feed it to another :class:`SolarSailProblem` as ``initial_guess`` to warm
         start a different discretisation of the same problem: trajopt resamples
         it onto the new mesh (polynomially from collocation, linearly from
         shooting).
         """
-        return self.method.export_guess(include_aux=False)
+        return dict(self.method.export_guess(include_aux=False))
 
     def phase_layouts(self) -> dict:
         """Per-phase state/control channel layout, for checking a guess transfer."""
-        return phase_layouts(self.trajectory, self.config.trajectory)
+        return {name: phase_layout(physical)
+                for name, physical in self.problem_spec.build_phases().items()}

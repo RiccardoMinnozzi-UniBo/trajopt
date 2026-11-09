@@ -42,7 +42,7 @@ problem:                       # the mesh, and anything else discretisation-depe
 
 method:
   inherit:
-    - trajopt/methods/dev/scp_phases/configs/second_order/autosqp.yaml   # SCP flavour
+    - trajopt/methods/dev/configs/second_order/autosqp.yaml   # SCP flavour
     - trajopt/methods/common/configs/discretize/second_order_p.yaml  # omit for shooting
     - method_common.yaml                                          # always, last
   hyperparams:
@@ -67,7 +67,7 @@ The settings that have mattered most on this problem, all per algorithm:
 
 A flow solves several algorithms in turn on the same problem, handing each
 stage's solution to a later one as its initial guess. The schema is trajopt's
-own (`examples/algflow`), plus optional inline overrides:
+own (`trajopt/methods/stable/configs/algflows`), plus optional inline overrides:
 
 ```yaml
 flow:

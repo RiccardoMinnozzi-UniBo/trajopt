@@ -1,0 +1,12 @@
+flow:
+  stages:
+    - name: p
+      config: stages/p.yaml
+    - name: ms
+      config: stages/ms.yaml
+      initial_guess:
+        from: p
+    - name: hp
+      config: stages/hp.yaml
+      initial_guess:
+        from: ms

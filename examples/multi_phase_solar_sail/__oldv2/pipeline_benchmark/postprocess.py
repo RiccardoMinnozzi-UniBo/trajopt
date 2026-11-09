@@ -53,7 +53,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 import solar_sail  # noqa: E402
-from trajopt.utils.tools import recursive_attrdict  # noqa: E402
+from trajopt.common.tools import recursive_attrdict  # noqa: E402
 from visualization import (_RC, BLUE, ECLIPSE_BAND, GREEN, GRID, MUTED, ORANGE,  # noqa: E402
                            PURPLE, TEXT)
 

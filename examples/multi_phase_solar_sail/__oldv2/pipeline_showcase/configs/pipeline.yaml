@@ -1,0 +1,45 @@
+# Pipeline showcase: p (relaxed) -> ms (true tolerances) -> hp (true, ms-mirrored mesh)
+#
+#   p   Radau p method, 24/4 nodes. Cost and dynamics tolerances 10x looser than
+#       the true ones: eps_cost 1e-3, accumulated defect budget 30 km.
+#   ms  multiple shooting, 12/3 nodes, 6 RK4 substeps. True tolerances:
+#       eps_cost 1e-4, 3 km budget.
+#   hp  Radau hp method mirroring the ms mesh: one segment per ms interval,
+#       each with as many intervals as ms has RK4 substeps (6). Sunlit arcs:
+#       11 segments, 67 nodes; eclipse arcs: 2 segments, 13 nodes. True
+#       tolerances.
+#
+# Stopping rule (flag_conv 2): cost change under eps_cost and the nonlinear
+# constraints (dynamics defect, terminal, continuity) within tolerance.
+method:
+  hyperparams:
+    convergence: {flag_conv: 2}
+flow:
+  stages:
+    - name: p
+      config: ../../algorithms/p.yaml
+      allow_nonconverged: true
+      problem: {max_accumulated_defect_km: 30.0}
+      method:
+        # with the relaxed budget p stalls from iteration ~40 at a stationary
+        # point with two late phases over the relaxed defect tolerance; past
+        # that it only repeats, so it hands over at 60
+        hyperparams: {convergence: {eps_cost: 1.0e-3, iter_max: 60}}
+    - name: ms
+      config: ../../algorithms/ms.yaml
+      initial_guess: {from: p}
+      allow_nonconverged: true
+      method:
+        inherit: ../../algorithms/warm_start.yaml
+        hyperparams: {convergence: {eps_cost: 1.0e-4}}
+    - name: hp
+      config: ../../algorithms/hp.yaml
+      initial_guess: {from: ms}
+      problem: {sunlit_nodes: 67, eclipse_nodes: 13, sunlit_hp_segments: 11, eclipse_hp_segments: 2}
+      method:
+        inherit: ../../algorithms/warm_start.yaml
+        hyperparams: {convergence: {eps_cost: 1.0e-4}}
+        # CVXPY's DPP parameter tensor grows as n_vars x n_params (both O(N)) and
+        # needs ~100 GB at this mesh; without DPP the subproblem is
+        # re-canonicalised each iteration (slower, linear memory).
+        solver_opts: {ignore_dpp: true}

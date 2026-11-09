@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from trajopt.methods.common import discretize
-from trajopt.utils.tools import recursive_attrdict
+from trajopt.common.tools import recursive_attrdict
 
 import solar_sail
 
@@ -395,7 +395,7 @@ def _chained_propagation(problem):
         nu_opt = np.asarray(data.nu_opt)
         n_nodes = z_opt.shape[0]
 
-        dynamics = next(c for c in segment.phase.constraints.values()
+        dynamics = next(c for c in segment.problem.constraints.values()
                         if c.type == "dynamics").fcn_znu
 
         z_start = z_opt[0] if z_end is None else z_end
@@ -550,7 +550,7 @@ def extract_solution(problem) -> SolarSailSolution:
         solar_pressure_n_m2=float(settings.sail.solar_pressure_n_m2),
         reflectivity=float(settings.sail.reflectivity),
         sun_direction_eci=sun_direction,
-        solver_converged=bool(problem.method._converged),
+        solver_converged=problem.converged,
         solver_status=str(problem.method.cp_subproblem.status),
         iterations=iterations,
         max_state_jump=max(state_jumps, default=0.0),

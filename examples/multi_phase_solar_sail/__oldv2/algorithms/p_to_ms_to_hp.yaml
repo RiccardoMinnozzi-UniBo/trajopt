@@ -1,6 +1,6 @@
 # Flow: Radau p method -> multiple shooting -> Radau hp method, each stage
 # warm-started from the one before.  The same chain as
-# examples/algflow/lander_6dof/p_to_ms_to_hp.yaml, on this problem.
+# trajopt/methods/stable/configs/algflows/p_to_ms_to_hp.yaml, on this problem.
 #
 #     python main.py algorithms/p_to_ms_to_hp.yaml
 

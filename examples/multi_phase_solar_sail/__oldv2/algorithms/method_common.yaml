@@ -5,7 +5,7 @@
 #
 #     method:
 #       inherit:
-#         - trajopt/methods/dev/scp_phases/configs/second_order/autosqp.yaml   # SCP flavour
+#         - trajopt/methods/dev/configs/second_order/autosqp.yaml   # SCP flavour
 #         - trajopt/methods/common/configs/discretize/second_order_p.yaml  # discretisation
 #         - method_common.yaml                                          # this file
 #
@@ -85,6 +85,10 @@ hyperparams:
     # satisfies it approximately, so it needs slack that the autotune removes.
     final_nonconvex_equality:
       vb: standard
+
+# Keep every iterate (trajopt's default, 'scalars', keeps only the first and the
+# last two): the convergence figures and the benchmark records read all of them.
+history: full
 
 solver_opts:
   solver: CLARABEL    # ships with CVXPY and handles the terminal cones

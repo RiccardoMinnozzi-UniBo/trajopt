@@ -8,7 +8,7 @@ revolution search, validation, figures, ``compare.py`` -- treats them alike:
 
 * a **flow**, e.g. ``algorithms/p_to_ms.yaml``: an ordered list of such configs,
   each solved in turn and optionally warm-started from an earlier one's
-  solution.  The schema is trajopt's ``flow.stages`` (see ``examples/algflow``),
+  solution.  The schema is trajopt's ``flow.stages`` (see ``trajopt/methods/stable/configs/algflows``),
   with inline overrides added so that a variant does not need a file of its own::
 
       flow:
@@ -50,8 +50,8 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from trajopt.utils import config_loader, tools
-from trajopt.utils.tools import AttrDict, recursive_attrdict
+from trajopt.common import config_reader as config_loader, tools
+from trajopt.common.tools import AttrDict, recursive_attrdict
 
 from problem import SolarSailProblem
 from solution import SolarSailSolution, extract_solution, validation_report
@@ -398,15 +398,9 @@ class Algorithm:
             finally:
                 timings["solve_s"] = time.perf_counter() - before
 
-            method = problem.method
-            outcome.iterations = max(int(p.current_iter_data.iter_num) for p in problem.segments.values())
-            status = method.cp_subproblem.status
-            if method._converged:
-                outcome.status, outcome.reason = "converged", "convergence criteria satisfied"
-            elif outcome.iterations > 0 and status in {"optimal", "optimal_inaccurate"}:
-                outcome.status, outcome.reason = "not_converged", "stopped before convergence"
-            else:
-                outcome.reason = f"solve failed: {status}, {outcome.iterations} accepted iterations"
+            result = problem.result
+            outcome.iterations = int(result.iterations)
+            outcome.status, outcome.reason = result.status, result.reason
 
             if validate and outcome.iterations > 0:
                 before = time.perf_counter()

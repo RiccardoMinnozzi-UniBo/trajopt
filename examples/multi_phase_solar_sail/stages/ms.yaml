@@ -1,0 +1,7 @@
+trajectory:
+  inherit: ../mission/problem.yaml
+method:
+  inherit: ../method.yaml
+  hyperparams:
+    convergence:
+      eps_cost: 1.0e-3

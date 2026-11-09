@@ -1,0 +1,10 @@
+inherit: common_arc.yaml
+
+params:
+  illumination: 0.0
+
+constraints:
+  ends_on_terminator:
+    type: final_nonconvex_equality
+    fcn: fcns.shadow_boundary
+    scale: [1.0]
