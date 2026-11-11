@@ -1,0 +1,10 @@
+# converged: 44 iterations, 58 s, 20.111 days
+inherit: problem_ms.yaml
+method:
+  inherit:
+    - trajopt/methods/stable/configs/first_order/autoscvx.yaml
+    - trajopt/methods/common/configs/initial_guess/propagation.yaml
+    - common.yaml
+  hyperparams:
+    discretize:
+      nsub: 6

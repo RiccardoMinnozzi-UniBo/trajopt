@@ -1,0 +1,8 @@
+# converged: 56 iterations, 65 s, 20.133 days
+inherit: ms_std.yaml
+method:
+  hyperparams:
+    trust_region:
+      tr_step:
+        z: 10.0
+        nu: 2.0

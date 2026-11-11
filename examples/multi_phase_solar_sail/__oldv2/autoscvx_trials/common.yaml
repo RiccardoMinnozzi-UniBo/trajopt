@@ -1,0 +1,10 @@
+hyperparams:
+  flags:
+    quiet: 0
+  convergence:
+    flag_conv: 2
+    eps_cost: 1.0e-4
+    iter_max: 300
+  penalties:
+    final_nonconvex_equality: {vb: standard}
+    final_nonconvex_inequality: {vb: none}

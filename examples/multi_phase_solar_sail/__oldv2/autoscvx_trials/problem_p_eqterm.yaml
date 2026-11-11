@@ -1,0 +1,10 @@
+inherit: problem_p.yaml
+trajectory:
+  phases:
+    final_arc:
+      fcns:
+        terminal_eccentricity_error: ../mission/solar_sail.py:terminal_eccentricity_error
+        terminal_perigee_error:      ../mission/solar_sail.py:terminal_perigee_error
+      constraints:
+        final_eccentricity: {type: final_nonconvex_equality, fcn: fcns.terminal_eccentricity_error, scale: [1.0e-3]}
+        final_perigee:      {type: final_nonconvex_equality, fcn: fcns.terminal_perigee_error, scale: [1.0]}

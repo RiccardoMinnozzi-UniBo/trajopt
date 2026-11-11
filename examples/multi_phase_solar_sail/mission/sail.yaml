@@ -20,10 +20,7 @@ sun_angular_rate_rad_s: "${np.deg2rad(sun_angular_rate_deg_per_day) / day_s}"
 
 perigee_altitude_km: 250.0
 eccentricity_max:    0.003
-perigee_margin_km:   0.3
-eccentricity_margin: 0.0
-final_perigee_radius_km: "${geo_radius_km + perigee_altitude_km + perigee_margin_km}"
-final_eccentricity_max:  "${eccentricity_max - eccentricity_margin}"
+final_perigee_radius_km: "${geo_radius_km + perigee_altitude_km}"
 
 period_days:      "${2.0 * np.pi * np.sqrt(geo_radius_km**3 / earth_mu_km3_s2) / day_s}"
 half_shadow_rad:  "${np.arcsin(earth_radius_km / geo_radius_km)}"

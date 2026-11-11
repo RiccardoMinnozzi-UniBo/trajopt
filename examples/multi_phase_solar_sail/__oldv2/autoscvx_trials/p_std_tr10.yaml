@@ -1,0 +1,12 @@
+# converged: 41 iterations, 151 s, 20.113 days
+inherit: problem_p.yaml
+method:
+  inherit:
+    - trajopt/methods/stable/configs/first_order/autoscvx-ps.yaml
+    - trajopt/methods/common/configs/initial_guess/propagation.yaml
+    - common.yaml
+  hyperparams:
+    trust_region:
+      tr_step:
+        z: 10.0
+        nu: 2.0

@@ -1,0 +1,10 @@
+# needs the f, g state_limits widened to +-0.05 in mission/common_arc.yaml (the guess leaves +-0.01)
+# converged: 30 iterations, 59 s, 20.425 days
+inherit: problem_ms_eqterm.yaml
+method:
+  inherit:
+    - trajopt/methods/stable/configs/first_order/autoscvx-term.yaml
+    - common.yaml
+  hyperparams:
+    discretize:
+      nsub: 6

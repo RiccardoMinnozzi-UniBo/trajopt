@@ -303,7 +303,7 @@ def terminal_perigee_radius(x, u, longitude, params):
 def terminal_eccentricity_cone(x, u, params):
     """Exact convex form of ``e_f <= e_max``."""
     del u
-    return cp.norm(x[:, 1:3], axis=1) - float(params.final_eccentricity_max)
+    return cp.norm(x[:, 1:3], axis=1) - float(params.eccentricity_max)
 
 
 def terminal_perigee_cone(x, u, params):

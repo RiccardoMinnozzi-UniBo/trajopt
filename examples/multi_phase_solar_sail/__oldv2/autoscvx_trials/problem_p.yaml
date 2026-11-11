@@ -1,0 +1,9 @@
+inherit:
+  - problem_ms.yaml
+  - ../stages/mesh_p.yaml
+trajectory:
+  phases:
+    final_arc:
+      params:
+        perigee_margin_km:   0.1
+        eccentricity_margin: 5.0e-6

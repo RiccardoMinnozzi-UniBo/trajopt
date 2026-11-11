@@ -1,10 +1,5 @@
-inherit: stages/p.yaml
-
-method:
-  hyperparams:
-    convergence:
-      eps_cost: 1.0e-4
-
+trajectory:
+  inherit: ../mission/problem.yaml
 analysis:
   type: standalone
   compute_iters: false
