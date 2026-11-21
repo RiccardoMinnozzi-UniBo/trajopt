@@ -1,5 +1,7 @@
-"""Writes mission/problem.yaml (ms mesh) and one mission/mesh_<name>.yaml per other mesh."""
+"""Writes mission/problem.yaml (ms mesh), one mission/mesh_<name>.yaml per other mesh,
+and one mission/problem_rev<n>.yaml per extra instance of the sweep."""
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +20,7 @@ MESHES = {
 DEFECT_BUDGET_KM = 0.3   # accumulated over all intervals; eps = budget / P_SCALE_KM / intervals
 P_SCALE_KM = 1000.0
 MIN_ARC_RAD = 0.05
+INSTANCES = [7, 14]   # revolutions of the extra problems; the perigee target scales with them
 
 
 def arcs(params):
@@ -59,7 +62,19 @@ def dynamics_eps(mesh, chain):
     return mesh.get("budget_km", DEFECT_BUDGET_KM) / P_SCALE_KM / intervals, intervals
 
 
-def write_problem(params, chain):
+def instance(revolutions):
+    """sail.yaml with fewer revolutions and the perigee raise per revolution of the 21-revolution problem."""
+    base = config_reader.load_trajopt_config(str(HERE / "mission" / "sail.yaml"))
+    overrides = dict(revolutions=revolutions,
+                     perigee_altitude_km=float(base.perigee_altitude_km) * revolutions / float(base.revolutions))
+    with tempfile.TemporaryDirectory() as folder:
+        file = Path(folder) / "sail.yaml"
+        file.write_text(f"inherit: {(HERE / 'mission' / 'sail.yaml').as_posix()}\n"
+                        + "".join(f"{key}: {value}\n" for key, value in overrides.items()))
+        return config_reader.load_trajopt_config(str(file)), overrides
+
+
+def write_problem(params, chain, file_name="problem.yaml", overrides=None):
     mesh = MESHES["ms"]
     eps, intervals = dynamics_eps(mesh, chain)
     L0, L1 = params.initial_longitude_rad, params.final_longitude_rad
@@ -83,8 +98,10 @@ def write_problem(params, chain):
         # u_start, u_stop = 0.0, 0.0
         x_stop = ", ".join(num(value) for value in final_state * (b - L0) / (L1 - L0))
 
-        lines += ["", f"  {name}:", f"    inherit: {kind}_arc.yaml", f"    num_nodes: {nodes(mesh, kind)}",
-                  "    constraints:", f"      dynamics: {{eps: {num(eps)}}}"]
+        lines += ["", f"  {name}:", f"    inherit: {kind}_arc.yaml", f"    num_nodes: {nodes(mesh, kind)}"]
+        if overrides:
+            lines.append("    params: {" + ", ".join(f"{key}: {value}" for key, value in overrides.items()) + "}")
+        lines += ["    constraints:", f"      dynamics: {{eps: {num(eps)}}}"]
         if previous is None:
             lines += ["      initial_state:   {type: initial_state, value: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}",
                       f"      initial_longitude: {{type: initial_time, value: {num(a)}}}"]
@@ -99,8 +116,8 @@ def write_problem(params, chain):
                   f"u_start: [{num(u_start)}], u_stop: [{num(u_stop)}]}}"]
         previous = name
 
-    (HERE / "mission" / "problem.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"mission/problem.yaml: {len(chain)} arcs, mesh ms, dynamics eps {num(eps)}")
+    (HERE / "mission" / file_name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"mission/{file_name}: {len(chain)} arcs, mesh ms, dynamics eps {num(eps)}")
 
 
 def write_mesh(key, chain):
@@ -127,6 +144,9 @@ def main():
     for key in MESHES:
         if key != "ms":
             write_mesh(key, chain)
+    for revolutions in INSTANCES:
+        params, overrides = instance(revolutions)
+        write_problem(params, arcs(params), f"problem_rev{revolutions}.yaml", overrides)
 
 
 if __name__ == "__main__":

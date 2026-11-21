@@ -1,8 +1,10 @@
 import dataclasses
+import functools
 from pathlib import Path
 
 import jax
 import numpy as np
+from scipy.interpolate import BarycentricInterpolator
 
 from trajopt.common.config_reader import load_trajopt_config
 from trajopt.common.persistence import save_result
@@ -15,14 +17,38 @@ jax.config.update("jax_enable_x64", True)
 CONFIG = "ms"   # "p" or "ms" (methods/<name>.yaml), or "p_ms_hp" (methods/p_ms_hp/<stage>.yaml, in that order)
 
 
+def control_polynomial(arc, segments):
+    """The control between the nodes of a pseudospectral arc: one polynomial per segment.
+    The saved trajectory interpolates it linearly, which is not the control the stage solved for."""
+    tau, u = arc.native_tau, arc.sample(arc.native_tau).u
+    order = (len(tau) - 1) // segments
+    pieces = [BarycentricInterpolator(tau[i:i + order + 1], u[i:i + order + 1]) for i in range(0, len(tau) - 1, order)]
+
+    def evaluate(query):
+        query = np.atleast_1d(query)
+        segment = np.minimum(np.searchsorted(tau, query, side="right") - 1, len(tau) - 2) // order
+        out = np.empty((len(query), u.shape[1]))
+        for number, piece in enumerate(pieces):
+            out[segment == number] = piece(query[segment == number])
+        return out
+    return evaluate
+
+
+def resample(arc, control, shift, tau):
+    samples = arc.sample(tau)
+    return dataclasses.replace(samples, t=samples.t - shift, u=samples.u if control is None else control(tau))
+
+
 def as_guess(result, start):
     """The solution of one stage as the initial guess of the next."""
-    guess = {name: arc.without_aux() for name, arc in result.trajectory.items()}
-    # the solver leaves the first longitude ~1e-9 off, the next stage wants it exact
-    name, arc = next(iter(guess.items()))
-    shift = arc.t[0] - start
-    guess[name] = TrajectoryFunction(
-        lambda tau: dataclasses.replace(arc.sample(tau), t=arc.sample(tau).t - shift), arc.native_tau)
+    guess = {}
+    for number, (name, arc) in enumerate(result.trajectory.items()):
+        arc = arc.without_aux()
+        mesh = result.phase_data[name]["mesh"]
+        control = control_polynomial(arc, mesh["segments"]) if mesh["discretize"] == "ps" else None
+        shift = arc.t[0] - start if number == 0 else 0.0   # the solver leaves the first longitude ~1e-9 off
+        guess[name] = arc if control is None and number else TrajectoryFunction(
+            functools.partial(resample, arc, control, shift), arc.native_tau)
     return guess
 
 

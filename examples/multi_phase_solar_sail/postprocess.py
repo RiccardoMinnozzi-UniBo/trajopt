@@ -270,5 +270,70 @@ bottom.set_ylabel("eccentricity")
 bottom.set_xlabel("time [days]   (solver nodes of each stage)")
 save(fig, "stages")
 
+
+# ---------------------------------------------------------------- the steering, stage by stage
+
+fig, (top, bottom) = plt.subplots(2, 1, sharex=True, figsize=(6.5, 4.5))
+curves = {"initial guess": (guess, guess_laws)}
+for name, stage in stages.items():
+    curves[name] = (stage.trajectory, {arc: steering_law(stage.trajectory[arc], stage.phase_data[arc]["mesh"])
+                                       for arc in stage.trajectory})
+for k, (label, (trajectory, stage_laws)) in enumerate(curves.items()):
+    style = dict(color="0.5", linestyle="--") if k == 0 else dict(color=f"C{k - 1}")
+    for i, (name, arc) in enumerate(trajectory.items()):
+        s = arc.sample(np.linspace(0.0, 1.0, 100))
+        top.plot(s.x[:, 5] / DAY, stage_laws[name](s.t) + s.t, label=label if i == 0 else None, **style)
+for name in arcs:
+    longitude = np.linspace(*arcs[name].t[[0, -1]], 400)
+    bottom.plot(flown[name](longitude)[5] / DAY, np.gradient(laws[name](longitude), longitude), "C0")
+for limit in (-sail.max_steering_rate_rad_per_rad, sail.max_steering_rate_rad_per_rad):
+    bottom.axhline(limit, color="k", linestyle="--", linewidth=0.8)
+shade_eclipses((top, bottom))
+top.legend()
+top.set_ylabel("steering + longitude [rad]")
+bottom.set_ylabel("steering rate [rad/rad]")
+bottom.set_xlabel("time [days]   (top: each stage's steering; bottom: final steering; dashed: limit)")
+save(fig, "steering")
+
+
+# ---------------------------------------------------------------- dynamics defects and penalty weights, stage by stage
+
+fig, (top, bottom) = plt.subplots(2, 1, sharex=True, figsize=(6.5, 4.5))
+for k, (label, stage) in enumerate(stages.items()):
+    for i, name in enumerate(stage.trajectory):
+        nodes = stage.trajectory[name].sample(stage.trajectory[name].native_tau)
+        eps = stage.phase_data[name]["constraints"]["dynamics"]["penalties"]["eps"]
+        defect = np.max(np.abs(stage.diagnostics[name]["dynamics_defect_nd"]) / eps, axis=1)
+        weight = np.max(stage.phase_data[name]["iter_data_list"][-1]["W"]["dynamics"], axis=1)
+        top.plot(nodes.x[1:, 5] / DAY, defect, ".", color=f"C{k}", markersize=3, label=label if i == 0 else None)
+        bottom.plot(nodes.x[1:, 5] / DAY, weight, ".", color=f"C{k}", markersize=3)
+top.axhline(1.0, color="k", linestyle="--", linewidth=0.8)
+top.set_yscale("log", nonpositive="mask")
+bottom.set_yscale("log", nonpositive="mask")
+shade_eclipses((top, bottom))
+top.legend()
+top.set_ylabel("dynamics defect / tolerance")
+bottom.set_ylabel("dynamics penalty weight")
+bottom.set_xlabel("time [days]   (one dot per interval, largest state; at the end of each stage)")
+save(fig, "defects")
+
+
+# ---------------------------------------------------------------- the eccentricity vector
+
+fig, ax = plt.subplots(figsize=(4.5, 4.5))
+for name in arcs:
+    longitude = np.linspace(*arcs[name].t[[0, -1]], 100)
+    fine = flown[name](longitude).T
+    ax.plot(fine[:, 1], fine[:, 2], "C0", linewidth=0.8)
+angle = np.linspace(0.0, 2.0 * np.pi, 200)
+ax.plot(sail.eccentricity_max * np.cos(angle), sail.eccentricity_max * np.sin(angle), "k--", linewidth=0.8)
+ax.plot(*flown_x[0, 1:3], "ko", markersize=4)
+ax.plot(*flown_x[-1, 1:3], "C3o", markersize=4)
+ax.set_aspect("equal")
+ax.set_xlabel("f")
+ax.set_ylabel("g")
+ax.set_title("eccentricity vector, flown open loop\n(black: start; red: end; dashed: final limit)", fontsize=9)
+save(fig, "eccentricity_vector")
+
 (folder / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 plt.show()

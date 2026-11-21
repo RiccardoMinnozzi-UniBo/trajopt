@@ -542,10 +542,11 @@ def merit_violation_dynamics(self, scp_phase):
     """Build the dynamics residual function for pseudospectral or multiple shooting discretization."""
     if scp_phase.hyperparams.discretize.mode == "ps":
         D_jnp = jnp.asarray(self.ps_D)
+        T_jnp = jnp.asarray(self.ps_T)
         dyn_batched = self.dyn_fcn_batched
         def violation(z, nu, params):
             f_col = dyn_batched(z[1:], nu[1:], params)
-            return 2.0 * D_jnp @ z - f_col
+            return T_jnp @ (2.0 * D_jnp @ z - f_col)
         return violation
     propagate = self.propagate
     ks        = jnp.arange(scp_phase.index_map.N.all - 1)

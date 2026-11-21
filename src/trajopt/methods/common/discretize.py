@@ -555,16 +555,18 @@ def final_time_interval_constraints_ps(constraint, subproblem):
 def dynamics_compile_ps(constraint, subproblem):
     mesh = subproblem.mesh
     constraint.ps_D = mesh.differentiation
-    # map the ps defects from derivatives to states (now comparable with ms)
+    # map the ps residuals from derivatives to per-interval state defects, as in ms:
+    # row j is z_j - z_{j-1} minus the integral of the interpolated dynamics over that interval
     p = (len(mesh.tau) - 1) // mesh.segments
-    constraint.ps_Dinv = sp.linalg.block_diag(*[np.linalg.inv(2.0 * mesh.differentiation[:p, 1:p + 1])] * mesh.segments)
-    constraint.dyn_fcn_batched = jax.jit(jax.vmap(constraint.dyn_fcn, in_axes=(0, 0, None)))
+    T_seg = np.diff(np.linalg.inv(2.0 * mesh.differentiation[:p, 1:p + 1]), axis=0, prepend=0.0)
+    constraint.ps_T    = sp.linalg.block_diag(*[T_seg] * mesh.segments)
+    constraint.ps_Tinv = sp.linalg.block_diag(*[np.linalg.inv(T_seg)] * mesh.segments)
 
     # only ps's per-node constraint linearization needs the dynamics Jacobians
-    df_dz  = jax.jit(jax.jacfwd(constraint.constraint.fcn_znu, argnums=0))
-    df_dnu = jax.jit(jax.jacfwd(constraint.constraint.fcn_znu, argnums=1))
-    dyn_fcn = constraint.dyn_fcn
-    constraint.lin_dyn = lambda z, nu, params: (dyn_fcn(z, nu, params), df_dz(z, nu, params), df_dnu(z, nu, params))
+    dyn_jacobians_k = jax.jacfwd(constraint.dyn_fcn, argnums=(0, 1))
+
+    constraint.dyn_fcn_batched       = jax.jit(jax.vmap(constraint.dyn_fcn, in_axes=(0, 0, None)))
+    constraint.dyn_jacobians_batched = jax.jit(jax.vmap(dyn_jacobians_k,    in_axes=(0, 0, None)))
 
 
 def dynamics_create_cvxpy_parameters_ps(constraint, subproblem):
@@ -579,6 +581,8 @@ def dynamics_create_cvxpy_constraints_ps(constraint, subproblem):
     N_col  = subproblem.index_map.N.all - 1
     vb_dyn = constraint.penalties.vb_var
     D = constraint.ps_D
+    # the slack is the per-interval state defect, so it enters the derivative rows through Tinv
+    vb_rows = constraint.ps_Tinv @ vb_dyn if vb_dyn is not None else None
 
     subproblem.cp_dyn_constraints = []
 
@@ -589,35 +593,23 @@ def dynamics_create_cvxpy_constraints_ps(constraint, subproblem):
         rhs_k = (subproblem.cp_params.ps_f_ref[k]
                  + subproblem.cp_params.ps_Ac[k] @ subproblem.dz[k + 1]
                  + subproblem.cp_params.ps_Bc[k] @ subproblem.dnu[k + 1]
-                 + (vb_dyn[k] if vb_dyn is not None else 0))
+                 + (vb_rows[k] if vb_rows is not None else 0))
         cnst = (lhs[k] == rhs_k)
         subproblem.cp_dyn_constraints.append(cnst)
         subproblem.cp_constraints.append(cnst)
 
 
 def dynamics_update_cvxpy_parameters_ps(constraint, subproblem):
-    z_opt  = subproblem.current_iter_data.z_opt
-    nu_opt = subproblem.current_iter_data.nu_opt
-    N_col  = subproblem.index_map.N.all - 1
-    n_z    = subproblem.index_map.n.z
-    n_nu   = subproblem.index_map.n.nu
+    z_col  = jnp.asarray(subproblem.current_iter_data.z_opt[1:])
+    nu_col = jnp.asarray(subproblem.current_iter_data.nu_opt[1:])
     params = subproblem.params
 
-    f_ref_col = np.zeros((N_col, n_z))
-    Ac_col    = np.zeros((N_col, n_z, n_z))
-    Bc_col    = np.zeros((N_col, n_z, n_nu))
+    f_jax        = constraint.dyn_fcn_batched(z_col, nu_col, params)
+    A_jax, B_jax = constraint.dyn_jacobians_batched(z_col, nu_col, params)
 
-    for k in range(N_col):
-        z_k  = np.asarray(z_opt[k + 1])
-        nu_k = np.asarray(nu_opt[k + 1])
-        fc_k, Ac_k, Bc_k = constraint.lin_dyn(z_k, nu_k, params)
-        f_ref_col[k, :] = np.asarray(fc_k)
-        Ac_col[k, :, :] = np.asarray(Ac_k)
-        Bc_col[k, :, :] = np.asarray(Bc_k)
-
-    subproblem.cp_params.ps_f_ref.value = f_ref_col
-    subproblem.cp_params.ps_Ac.value    = Ac_col
-    subproblem.cp_params.ps_Bc.value    = Bc_col
+    subproblem.cp_params.ps_f_ref.value = np.asarray(f_jax)
+    subproblem.cp_params.ps_Ac.value    = np.asarray(A_jax)
+    subproblem.cp_params.ps_Bc.value    = np.asarray(B_jax)
 
 
 def dynamics_update_current_iter_data_ps(constraint, subproblem):
@@ -630,7 +622,7 @@ def dynamics_update_current_iter_data_ps(constraint, subproblem):
     lhs = 2.0 * D_jnp @ z_jnp
 
     f_vals = constraint.dyn_fcn_batched(z_jnp[1:], nu_jnp[1:], subproblem.params)
-    subproblem.current_iter_data.defect = constraint.ps_Dinv @ np.asarray(lhs - f_vals)
+    subproblem.current_iter_data.defect = constraint.ps_T @ np.asarray(lhs - f_vals)
 
 
 # ---------------------------------------------------------------------------
