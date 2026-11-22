@@ -1,10 +1,29 @@
-"""Summary tables of results/study/study.csv, written to results/study/summary.md."""
+"""Summary tables of results/study/study.csv, written to results/study/summary.md.
+
+    python study_tables.py           tables from the existing results
+    python study_tables.py --run     first solve (sweep.py) the cases of the tables that have no result yet
+    python study_tables.py --fresh   all of them from scratch: the existing results/study is renamed first
+    --term                           with --run or --fresh: also the autoscvx-term cases (~800, slow to fail)
+
+A full solve takes about two and a half days on 20 cores and 63 GB.
+"""
 import csv
 import re
 import statistics
+import subprocess
+import sys
+import time
 from pathlib import Path
 
-STUDY = Path(__file__).resolve().parent / "results" / "study"
+HERE = Path(__file__).resolve().parent
+STUDY = HERE / "results" / "study"
+BLOCKS = ["A", "B", "J", "C", "D", "F", "G", "T", "K", "I", "L", "M", "N", "O"]   # every block the tables use
+if "--fresh" in sys.argv and STUDY.exists():
+    STUDY.rename(STUDY.with_name(time.strftime("study_%Y%m%d_%H%M")))
+if "--run" in sys.argv or "--fresh" in sys.argv:
+    term = [] if "--term" in sys.argv else ["--autoscvx"]
+    subprocess.run([sys.executable, str(HERE / "sweep.py"), *BLOCKS, *term], cwd=HERE, check=True)
+
 DAY = 86400.0
 LOOSE = 1.0e4
 rows = list(csv.DictReader(open(STUDY / "study.csv")))
@@ -178,7 +197,7 @@ body = []
 for r in term:
     body.append([describe(r["stages"]), r["guess"][:2], f"{r['eps_feas']:.0e}", r["final_status"], r["iterations"],
                  f"{r['time_s']:.0f}"])
-out += table(["stage", "start", "eps", "status", "iters", "time s"], body)
+out += table(["stage", "start", "eps", "status", "iters", "time s"], body) if term else ["No autoscvx-term case solved."]
 out += ["", f"Only {len(term)} of the planned term cases ran; the rest were left out of the overnight runs after",
         "these failed. With the dynamics hard the first subproblem is infeasible unless the terminal cones and arc-end",
         "windows are softened too; with them softened the solver still ends without a usable trajectory after 20-30",
