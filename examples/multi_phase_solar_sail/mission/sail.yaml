@@ -2,7 +2,7 @@
 revolutions: 21
 initial_longitude_rad: "${np.pi}"
 terminator_window_rad: 0.05
-final_longitude_freedom_rad: "${np.pi}"
+final_longitude_freedom_rad: "${2.0 * np.pi}"
 
 earth_mu_km3_s2: 398600.436233
 earth_radius_km: 6378.1366

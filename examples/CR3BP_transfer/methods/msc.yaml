@@ -1,0 +1,8 @@
+inherit: ms.yaml
+
+nodes_per_time_unit: 1      # each interval spans ~3 e-folds near L1
+
+method:
+  hyperparams:
+    discretize:
+      nsub: 200

@@ -1,0 +1,11 @@
+nodes_per_time_unit: 10
+
+trajectory:
+  constraints:
+    dynamics: {eps: 1.0e-5}
+
+method:
+  inherit: method.yaml
+  hyperparams:
+    discretize:
+      nsub: 20

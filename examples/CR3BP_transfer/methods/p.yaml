@@ -1,0 +1,10 @@
+nodes_per_time_unit: 16
+
+trajectory:
+  constraints:
+    dynamics: {eps: 1.0e-5}
+
+method:
+  inherit:
+    - method.yaml
+    - trajopt/methods/common/configs/discretize/pseudospectral_p.yaml

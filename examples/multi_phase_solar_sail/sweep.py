@@ -33,6 +33,7 @@ import csv
 import ctypes
 import itertools
 import json
+import os
 import random
 import subprocess
 import sys
@@ -61,7 +62,7 @@ from solve import as_guess, carry_weights  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
-SWEEP = HERE / "results" / "study"
+SWEEP = HERE / "results" / os.environ.get("SWEEP_DIR", "study")
 MEMORY_GB = 95         # sum of the estimated peaks of the cases running at once (short peaks rarely coincide)
 MAX_RUNNING = 16
 TIMEOUT_S = 7200       # the same for every case

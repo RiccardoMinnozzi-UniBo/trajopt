@@ -449,5 +449,5 @@ phases:
       state_continuity:     {type: state_continuity, phase: arc_40_eclipse}
       longitude_continuity: {type: time_continuity, phase: arc_40_eclipse}
       control_continuity:   {type: control_continuity, phase: arc_40_eclipse}
-      arc_end_window: {lower: [129.01370168545031], upper: [132.1552943390401]}
+      arc_end_window: {lower: [126.20865810697994], upper: [132.1552943390401]}
     guess: {t_start: 126.15865810697994, t_stop: 132.1552943390401, x_start: previous, x_stop: [250.0, 0.0, 0.0, 0.0, 0.0, 1769221.7867846587], u_start: [-121.44626912659525], u_stop: [-127.44290535865542]}

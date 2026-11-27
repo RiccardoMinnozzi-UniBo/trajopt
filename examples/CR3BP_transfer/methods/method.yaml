@@ -1,0 +1,16 @@
+inherit: trajopt/methods/stable/configs/first_order/autoscvx.yaml
+
+hyperparams:
+  convergence:
+    flag_conv: 2
+    eps_cost: 1.0e-3
+    iter_max: 200
+
+  trust_region:
+    tr_step:
+      z: 1.0
+      nu: 1.0
+
+solver_opts:
+  solver: CLARABEL
+  direct_solve_method: qdldl
